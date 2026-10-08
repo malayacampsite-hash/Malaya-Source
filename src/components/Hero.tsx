@@ -30,8 +30,10 @@ export function Hero({ onBook, dailyMessage }: Props) {
             preload="auto"
             poster="/images/hero.webp"
             aria-hidden="true"
+            onLoadedData={(event) => event.currentTarget.classList.add('is-ready')}
           >
-            <source src="/videos/malaya-hero.mp4?v=2" type="video/mp4" />
+            <source src="/videos/malaya-hero-mobile.mp4?v=3" type="video/mp4" media="(max-width: 767px)" />
+            <source src="/videos/malaya-hero.mp4?v=3" type="video/mp4" />
           </video>
         </div>
         <div className="hero-card">

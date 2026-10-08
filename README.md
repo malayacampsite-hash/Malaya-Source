@@ -112,4 +112,4 @@ The booking interface uses the same general decision flow the references suggest
 
 
 ### Hero video
-The homepage hero uses the supplied campsite video from `public/videos/malaya-hero.mp4`. It is muted, looping, inline, and uses `public/images/hero.webp` as its poster/fallback image. The uploaded 4K source was optimized to 1080p H.264 without audio for a lighter Vercel deployment.
+The homepage hero uses the supplied campsite video from `public/videos/malaya-hero.mp4`. It is muted, looping, inline, and uses `public/images/hero.webp` as its poster/fallback image. The video is optimized for fast web delivery: desktop uses a 1280×720 H.264 encode (~3.8 MB) and mobile uses a 640×360 H.264 encode (~1.0 MB), both without audio. The poster remains visible until the first video frame is ready, then the video fades in.
