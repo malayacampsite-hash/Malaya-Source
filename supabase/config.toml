@@ -1,0 +1,4 @@
+# Edge Function configuration for Supabase production webhooks.
+# The function authenticates the Database Webhook itself with the Supabase service key.
+[functions.booking-automation]
+verify_jwt = false

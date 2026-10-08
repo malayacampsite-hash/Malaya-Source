@@ -22,6 +22,17 @@ export type BookingDraft = {
 
 export type BookingStatus = 'pending' | 'confirmed' | 'declined' | 'completed'
 
+export type SiteReview = {
+  id: string
+  full_name: string
+  rating: number
+  review_text: string
+  photo_data: string | null
+  published: boolean
+  created_at: string
+  updated_at: string
+}
+
 export type SupportMessage = {
   id: string
   sender: 'visitor' | 'bot' | 'staff'

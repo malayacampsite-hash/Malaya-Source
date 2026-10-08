@@ -1,5 +1,5 @@
 import { createClient, type Session } from '@supabase/supabase-js'
-import type { BookingDraft, BookingStatus } from '../types'
+import type { BookingDraft, BookingStatus, SiteReview } from '../types'
 
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? '').replace(/\/$/, '')
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? ''
@@ -56,6 +56,12 @@ export type SupabaseAdminBooking = {
   notes: string | null
   status: BookingStatus
   created_at: string
+  sheet_row_number: number | null
+  sheet_synced_at: string | null
+  sheet_sync_error: string | null
+  receipt_sent_at: string | null
+  receipt_processing_at: string | null
+  receipt_last_error: string | null
 }
 
 export async function listBookings(session?: Session) {
@@ -172,4 +178,59 @@ export async function verifyAdmin() {
   const { data, error } = await client.rpc('is_malaya_admin')
   if (error) throw error
   return data === true
+}
+
+export async function listPublishedReviews(limit = 12): Promise<SiteReview[]> {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('site_reviews')
+    .select('*')
+    .eq('published', true)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return (data ?? []) as SiteReview[]
+}
+
+export async function createReview(input: { fullName: string; rating: number; reviewText: string; photoData?: string | null }) {
+  const client = requireSupabase()
+  const fullName = input.fullName.replace(/\u0000/g, '').replace(/[\u0001-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+  const reviewText = input.reviewText.replace(/\u0000/g, '').replace(/[\u0001-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000)
+  const photoData = (input.photoData ?? '').replace(/\s/g, '')
+  if (!fullName) throw new Error('Please provide your full name.')
+  if (!Number.isInteger(input.rating) || input.rating < 1 || input.rating > 5) throw new Error('Please choose a star rating from 1 to 5.')
+  if (!reviewText) throw new Error('Please write a review before submitting.')
+  if (photoData && (!/^[A-Za-z0-9+/]+={0,2}$/.test(photoData) || photoData.length > 1800000)) {
+    throw new Error('The review photo could not be validated.')
+  }
+  const { error } = await client.from('site_reviews').insert({
+    full_name: fullName,
+    rating: input.rating,
+    review_text: reviewText,
+    photo_data: photoData || null,
+    published: true,
+  })
+  if (error) throw error
+}
+
+export async function listReviewsAdmin(): Promise<SiteReview[]> {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('site_reviews')
+    .select('*')
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return (data ?? []) as SiteReview[]
+}
+
+export async function setReviewPublished(id: string, published: boolean) {
+  const client = requireSupabase()
+  const { error } = await client.from('site_reviews').update({ published }).eq('id', id)
+  if (error) throw error
+}
+
+export async function deleteReview(id: string) {
+  const client = requireSupabase()
+  const { error } = await client.from('site_reviews').delete().eq('id', id)
+  if (error) throw error
 }

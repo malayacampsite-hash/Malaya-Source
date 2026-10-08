@@ -309,3 +309,80 @@ drop policy if exists "admins insert messages" on public.support_messages;
 create policy "admins insert messages" on public.support_messages
 for insert to authenticated
 with check (public.is_malaya_admin() and sender = 'staff');
+
+-- ============================================================
+-- Reviews + Google automation metadata
+-- ============================================================
+
+alter table public.bookings
+  add column if not exists sheet_row_number integer,
+  add column if not exists sheet_synced_at timestamptz,
+  add column if not exists sheet_sync_error text,
+  add column if not exists receipt_sent_at timestamptz,
+  add column if not exists receipt_processing_at timestamptz,
+  add column if not exists receipt_last_error text;
+
+create table if not exists public.site_reviews (
+  id uuid primary key default gen_random_uuid(),
+  full_name text not null check (char_length(trim(full_name)) between 1 and 120),
+  rating smallint not null check (rating between 1 and 5),
+  review_text text not null check (char_length(trim(review_text)) between 1 and 2000),
+  photo_data text,
+  published boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.site_reviews
+  add column if not exists photo_data text;
+
+alter table public.site_reviews
+  drop constraint if exists site_reviews_photo_data_valid;
+
+alter table public.site_reviews
+  add constraint site_reviews_photo_data_valid
+  check (
+    photo_data is null
+    or (
+      char_length(photo_data) between 100 and 1800000
+      and photo_data ~ '^[A-Za-z0-9+/]+={0,2}$'
+    )
+  );
+
+create index if not exists site_reviews_published_created_idx
+  on public.site_reviews(published, created_at desc);
+
+drop trigger if exists site_reviews_touch_updated_at on public.site_reviews;
+create trigger site_reviews_touch_updated_at before update on public.site_reviews
+for each row execute function public.touch_updated_at();
+
+alter table public.site_reviews enable row level security;
+
+drop policy if exists "public read published reviews" on public.site_reviews;
+create policy "public read published reviews" on public.site_reviews
+for select to anon, authenticated
+using (published = true);
+
+drop policy if exists "public submit published reviews" on public.site_reviews;
+create policy "public submit published reviews" on public.site_reviews
+for insert to anon, authenticated
+with check (published = true);
+
+drop policy if exists "admins read all reviews" on public.site_reviews;
+create policy "admins read all reviews" on public.site_reviews
+for select to authenticated
+using (public.is_malaya_admin());
+
+drop policy if exists "admins update reviews" on public.site_reviews;
+create policy "admins update reviews" on public.site_reviews
+for update to authenticated
+using (public.is_malaya_admin())
+with check (public.is_malaya_admin());
+
+drop policy if exists "admins delete reviews" on public.site_reviews;
+create policy "admins delete reviews" on public.site_reviews
+for delete to authenticated
+using (public.is_malaya_admin());
+
+-- The visitor review flow deliberately does not require an account.
+-- Reviews are stored as plain text and the frontend renders them as text only.
