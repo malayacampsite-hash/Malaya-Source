@@ -1,13 +1,6 @@
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import { withSupabase } from 'npm:@supabase/server@^1'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-}
-
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? ''
-const SERVICE_KEY = getSupabaseSecretKey()
 const SHEET_ID = Deno.env.get('GOOGLE_SHEET_ID') ?? ''
 const SHEET_RANGE = Deno.env.get('GOOGLE_SHEET_RANGE') ?? 'Bookings!A:O'
 const SHEET_NAME = (SHEET_RANGE.split('!')[0] || 'Bookings').replace(/^'+|'+$/g, '')
@@ -17,11 +10,6 @@ const GOOGLE_CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET') ?? ''
 const GOOGLE_REFRESH_TOKEN = Deno.env.get('GOOGLE_REFRESH_TOKEN') ?? ''
 const PUBLIC_SITE_URL = (Deno.env.get('MALAYA_PUBLIC_SITE_URL') ?? '').replace(/\/$/, '')
 const LOGO_URL = Deno.env.get('MALAYA_LOGO_URL') || (PUBLIC_SITE_URL ? `${PUBLIC_SITE_URL}/images/logo.png` : '')
-
-const supabaseAdmin = SUPABASE_URL && SERVICE_KEY
-  ? createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-  : null
-
 type BookingRecord = {
   id: string
   booking_reference: string
@@ -52,25 +40,8 @@ type WebhookPayload = {
   record: BookingRecord | null
   old_record: BookingRecord | null
 }
-
-function getSupabaseSecretKey() {
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  if (legacy) return legacy
-  const secretMap = Deno.env.get('SUPABASE_SECRET_KEYS')
-  if (!secretMap) return ''
-  try {
-    const parsed = JSON.parse(secretMap) as Record<string, string>
-    return parsed.default ?? ''
-  } catch {
-    return ''
-  }
-}
-
 function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' },
-  })
+  return Response.json(data, { status })
 }
 
 function normalizeText(value: string | null | undefined, max = 2000) {
@@ -312,13 +283,18 @@ function bookingMeaningfullyChanged(oldRecord: BookingRecord | null, record: Boo
   return fields.some(field => oldRecord[field] !== record[field])
 }
 
-async function writeAutomationMetadata(id: string, patch: Record<string, unknown>) {
-  if (!supabaseAdmin) return
+async function writeAutomationMetadata(
+  supabaseAdmin: SupabaseClient,
+  id: string,
+  patch: Record<string, unknown>,
+) {
   await supabaseAdmin.from('bookings').update(patch).eq('id', id)
 }
 
-async function claimReceipt(id: string) {
-  if (!supabaseAdmin) return false
+async function claimReceipt(
+  supabaseAdmin: SupabaseClient,
+  id: string,
+) {
   const { data, error } = await supabaseAdmin
     .from('bookings')
     .update({ receipt_processing_at: new Date().toISOString() })
@@ -330,7 +306,10 @@ async function claimReceipt(id: string) {
   return !error && Boolean(data?.id)
 }
 
-async function processBooking(payload: WebhookPayload) {
+async function processBooking(
+  payload: WebhookPayload,
+  supabaseAdmin: SupabaseClient,
+) {
   const booking = payload.record
   if (!booking || payload.table !== 'bookings' || payload.schema !== 'public') return { ignored: true }
   if (payload.type === 'DELETE') return { ignored: true }
@@ -343,29 +322,29 @@ async function processBooking(payload: WebhookPayload) {
       const rowNumber = await syncBookingToSheet(booking)
       result.spreadsheet = 'synced'
       result.sheet_row_number = rowNumber
-      await writeAutomationMetadata(booking.id, { sheet_row_number: rowNumber, sheet_synced_at: new Date().toISOString(), sheet_sync_error: null })
+      await writeAutomationMetadata(supabaseAdmin, booking.id, { sheet_row_number: rowNumber, sheet_synced_at: new Date().toISOString(), sheet_sync_error: null })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown spreadsheet error.'
       result.spreadsheet = 'failed'
       result.spreadsheet_error = message
-      await writeAutomationMetadata(booking.id, { sheet_sync_error: message })
+      await writeAutomationMetadata(supabaseAdmin, booking.id, { sheet_sync_error: message })
     }
   }
 
   const becameConfirmed = booking.status === 'confirmed' && payload.old_record?.status !== 'confirmed'
   if (becameConfirmed && !booking.receipt_sent_at) {
-    const claimed = await claimReceipt(booking.id)
+    const claimed = await claimReceipt(supabaseAdmin, booking.id)
     if (claimed) {
       try {
         const messageId = await sendBookingReceipt(booking)
         result.receipt = 'sent'
         result.gmail_message_id = messageId
-        await writeAutomationMetadata(booking.id, { receipt_sent_at: new Date().toISOString(), receipt_processing_at: null, receipt_last_error: null })
+        await writeAutomationMetadata(supabaseAdmin, booking.id, { receipt_sent_at: new Date().toISOString(), receipt_processing_at: null, receipt_last_error: null })
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown Gmail error.'
         result.receipt = 'failed'
         result.receipt_error = message
-        await writeAutomationMetadata(booking.id, { receipt_processing_at: null, receipt_last_error: message })
+        await writeAutomationMetadata(supabaseAdmin, booking.id, { receipt_processing_at: null, receipt_last_error: message })
       }
     } else {
       result.receipt = 'already-processing'
@@ -374,22 +353,21 @@ async function processBooking(payload: WebhookPayload) {
 
   return result
 }
+export default {
+  // Database Webhooks send the Supabase secret API key in `apikey`.
+  // `withSupabase` validates it and supplies the privileged client.
+  fetch: withSupabase({ auth: 'secret' }, async (request, ctx) => {
+    if (request.method !== 'POST') {
+      return json({ error: 'Method not allowed.' }, 405)
+    }
 
-Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
-  if (request.method !== 'POST') return json({ error: 'Method not allowed.' }, 405)
-  if (!SUPABASE_URL || !SERVICE_KEY || !supabaseAdmin) return json({ error: 'Supabase server configuration is incomplete.' }, 500)
-
-  const auth = request.headers.get('authorization') ?? ''
-  const suppliedToken = auth.replace(/^Bearer\s+/i, '').trim()
-  if (!suppliedToken || suppliedToken !== SERVICE_KEY) return json({ error: 'Unauthorized webhook.' }, 401)
-
-  try {
-    const payload = await request.json() as WebhookPayload
-    const result = await processBooking(payload)
-    return json({ ok: true, ...result })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unexpected automation error.'
-    return json({ ok: false, error: message }, 500)
-  }
-})
+    try {
+      const payload = await request.json() as WebhookPayload
+      const result = await processBooking(payload, ctx.supabaseAdmin)
+      return json({ ok: true, ...result })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected automation error.'
+      return json({ ok: false, error: message }, 500)
+    }
+  }),
+}

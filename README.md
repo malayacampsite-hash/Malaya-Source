@@ -83,29 +83,35 @@ When a booking is edited (including an admin status change):
 1. Supabase fires the same webhook on `UPDATE`.
 2. The function updates the corresponding sheet row.
 
-When a booking changes from `pending` (or another non-confirmed state) to `confirmed`:
+When a booking changes from a non-confirmed state to `confirmed`:
 
 1. The same function syncs the sheet.
-2. It sends a branded booking confirmation / receipt through the Gmail API.
-3. The email includes the Malaya Campsite logo inline when `MALAYA_LOGO_URL` is reachable.
-4. `receipt_sent_at` is recorded in Supabase to prevent duplicate automatic receipts.
+2. It sends a branded booking confirmation through the Gmail API once Gmail is configured.
+3. `receipt_sent_at` is recorded in Supabase to prevent duplicate automatic receipts.
 
-Google's Gmail API uses OAuth 2.0 and the `users.messages.send` endpoint; messages are sent as base64url-encoded MIME in the `raw` field. Google Sheets uses `spreadsheets.values.append` for new rows and `spreadsheets.values.update` for row synchronization.
+### Current Supabase key approach
 
-### Required Google OAuth scopes
+This project uses Supabase's current **publishable/secret API key model**.
 
-The refresh token used by the Edge Function needs, at minimum:
+**Frontend (`.env`)**
 
-- `https://www.googleapis.com/auth/gmail.send`
-- `https://www.googleapis.com/auth/spreadsheets`
+```env
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+```
 
-Use an OAuth 2.0 authorization-code flow with offline access so the backend can refresh access tokens without the Gmail account being present. Google documents refresh tokens as the mechanism for offline API access. Do not commit the client secret or refresh token to Git.
+The browser never receives a Supabase secret key.
 
-Important: if the Google OAuth consent screen is still in **Testing** for an external app, Google currently limits authorization to listed test users and the authorization/refresh token expires after seven days. Put the production OAuth app into the appropriate production state before relying on it continuously.
+**CLI (`.env.supabase`)**
 
-### Supabase Edge Function secrets
+```env
+SUPABASE_PROJECT_REF=YOUR_PROJECT_REF
+SUPABASE_ACCESS_TOKEN=sbp_...
+```
 
-Set these in **Supabase -> Edge Functions -> Secrets** (not in the Vite frontend):
+`SUPABASE_ACCESS_TOKEN` is the Supabase CLI Personal Access Token used for deployment. It is not the database secret key. This lets you deploy without `supabase login`.
+
+**Edge Function (`supabase/functions/.env`)**
 
 ```env
 GOOGLE_CLIENT_ID=...
@@ -114,135 +120,67 @@ GOOGLE_REFRESH_TOKEN=...
 GOOGLE_SHEET_ID=...
 GOOGLE_SHEET_RANGE=Bookings!A:O
 GMAIL_SENDER_EMAIL=malayacampsite@gmail.com
-MALAYA_PUBLIC_SITE_URL=https://your-domain.com
-MALAYA_LOGO_URL=https://your-domain.com/images/logo.png
+MALAYA_PUBLIC_SITE_URL=https://malayacampsite.com
+MALAYA_LOGO_URL=https://malayacampsite.com/images/logo.png
 ```
 
-Supabase already supplies the project URL and secret/publishable keys to Edge Functions; the service key is used only inside the Edge Function for trusted database updates.
+Hosted Supabase automatically provides `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEYS`, and `SUPABASE_SECRET_KEYS` to Edge Functions. The function uses `@supabase/server` with `withSupabase({ auth: 'secret' })`, which validates the secret API key and provides `ctx.supabaseAdmin` for trusted database updates.
+
+Do not add a custom `SUPABASE_SECRET_KEY` to the Edge Function secrets. The `SUPABASE_` namespace is reserved for Supabase's injected variables.
+
+### Google OAuth scopes
+
+The Google refresh token needs:
+
+- `https://www.googleapis.com/auth/spreadsheets`
+- `https://www.googleapis.com/auth/gmail.send` when Gmail is activated
+
+Use OAuth 2.0 offline access so the backend can refresh access tokens without the user being present. Never commit the client secret or refresh token.
 
 ### Configure the Database Webhook
 
-After deploying the Edge Function, in Supabase Dashboard -> Database -> Webhooks create a webhook for:
+After deploying `booking-automation`, create a Database Webhook for `public.bookings` with:
 
-- Table: `public.bookings`
 - Events: `INSERT` and `UPDATE`
-- Destination: the `booking-automation` Supabase Edge Function
 - Method: `POST`
-- Authorization header: add the Supabase service key through the Dashboard option
-- Content-Type: `application/json`
+- Destination: the `booking-automation` Edge Function
+- `Content-Type`: `application/json`
+- **`apikey` header:** your Supabase **secret API key** (`sb_secret_...`)
 
-The function has `verify_jwt = false` because it authenticates this server-to-server webhook itself by comparing the bearer token with the configured Supabase secret/service key.
+Do **not** send the secret key as `Authorization: Bearer ...`. The current Supabase API-key model uses the `apikey` header for secret/publishable keys, and `withSupabase({ auth: 'secret' })` validates it.
 
-### Deploy the function
+For database-side webhook definitions created with SQL/`pg_net`, Supabase recommends keeping the secret in Vault rather than hardcoding it in SQL.
 
-With the Supabase CLI linked to the correct project:
+### Deploy without `supabase login`
 
-```bash
-supabase functions deploy booking-automation
+From PowerShell:
+
+```powershell
+cd C:\Users\Administrator\Desktop\Malaya-Campsite
+.\scripts\deploy-booking-automation.ps1
 ```
 
-Then set production secrets with either the Supabase Dashboard or:
+The script reads `.env.supabase`, pushes the Edge Function secrets from `supabase/functions/.env`, and deploys `booking-automation` to the project ref in `.env.supabase`.
 
-```bash
-supabase secrets set --env-file supabase/functions/.env
+Manual commands:
+
+```powershell
+$env:SUPABASE_ACCESS_TOKEN = "sbp_YOUR_TOKEN"
+
+npx supabase secrets set --env-file .\supabase\functions\.env --project-ref YOUR_PROJECT_REF
+
+npx supabase functions deploy booking-automation --project-ref YOUR_PROJECT_REF --use-api
 ```
 
-Do not commit `supabase/functions/.env`.
+### Security
 
-## Spreadsheet columns
+Never put any of these in the Vite frontend or commit them:
 
-The automation uses the following order in the `Bookings` tab:
+- `sb_secret_...` Supabase secret keys
+- `sbp_...` Supabase CLI access tokens
+- Google client secrets
+- Google refresh tokens
 
-1. Booking ID
-2. Booking Reference
-3. Stay
-4. Check-in
-5. Check-out
-6. Guests
-7. Full Name
-8. Email
-9. Phone
-10. Preferred Arrival
-11. Notes
-12. Status
-13. Created At
-14. Updated At
-15. Receipt Sent At
+The only Supabase credential intended for browser use is the publishable key, with access controlled by RLS.
 
-The function automatically creates the header row if the configured sheet is empty.
-
-Spreadsheet formula injection is explicitly mitigated: booking text that begins with `=`, `+`, `-`, or `@` is written as a literal text value instead of being interpreted as a formula.
-
-## Review QR flow
-
-The QR code should point to:
-
-```text
-https://YOUR-DOMAIN/review
-```
-
-The route is intentionally not included in the normal navigation. It is a standalone mobile-friendly form for guests after their stay.
-
-Flow:
-
-Guest scans QR -> review page -> full name -> stars -> review text -> submit -> confirmation -> `/` `#reviews`.
-
-Reviews are immediately published by default so the guest story can appear on the public homepage. Staff can later hide or delete a review from `/admin` without exposing any account system to the guest.
-
-## Security notes
-
-- Never put Google OAuth client secrets or refresh tokens in a Vite environment variable.
-- Never put a Supabase service-role/secret key in the browser.
-- Review text is never injected as HTML.
-- Booking/customer data remains protected by Supabase RLS.
-- The Edge Function validates the server-to-server webhook bearer token.
-- Google Sheets writes protect against spreadsheet formula injection.
-- Email HTML escapes all booking-supplied values before rendering them.
-
-## Run locally
-
-```bash
-npm install
-npm run dev
-```
-
-Production build:
-
-```bash
-npm run build
-```
-
-## Vercel
-
-Set only the public Supabase values in Vercel:
-
-```env
-VITE_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
-```
-
-Google credentials stay in Supabase Edge Function secrets.
-
-`vercel.json` rewrites application routes to `index.html`, so `/admin` and `/review` work on direct navigation and refresh.
-
-## Supplied photography and hero video
-
-The website uses the supplied Malaya Campsite imagery and optimized hero videos in `public/images` and `public/videos`.
-
-Desktop hero video: `public/videos/malaya-hero.mp4`
-
-Mobile hero video: `public/videos/malaya-hero-mobile.mp4`
-
-
-## Guest review photos
-
-The QR review page at `/review` accepts an optional JPG, PNG, or WebP guest photo without requiring an account.
-The browser downsizes the image, converts it to WebP, and stores only the compressed Base64 payload in
-`public.site_reviews.photo_data`. The database constraint caps the stored value at 1.8 million Base64 characters.
-
-Apply the updated `supabase-schema.sql` before using the photo field. Existing reviews remain valid because `photo_data`
-is nullable.
-
-Review text and guest names are always rendered as text nodes. The app never injects review HTML, and photo data is
-accepted only as Base64 for a browser-generated WebP image. The review route remains hidden from normal navigation and
-is intended for the printed QR code.
+Gmail automation can remain unconfigured while we finish the Supabase + Google Sheets setup.
