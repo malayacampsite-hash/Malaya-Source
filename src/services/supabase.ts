@@ -1,5 +1,7 @@
-import { createClient, type Session } from '@supabase/supabase-js'
-import type { BookingDraft, BookingStatus, SiteReview } from '../types'
+import { createClient } from '@supabase/supabase-js'
+import { accommodation } from '../data/siteContent'
+import type { Accommodation, BookingDraft, BookingStatus, SiteReview } from '../types'
+import { validateBookingDraft } from './bookingValidation'
 
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? '').replace(/\/$/, '')
 // Current Supabase API key model: use a publishable key in browser code.
@@ -20,6 +22,10 @@ function requireSupabase() {
   return supabase
 }
 
+function normalizeSupportText(value: string, max: number) {
+  return value.replace(/\u0000/g, '').replace(/[\u0001-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
 export async function getSiteSetting(key: string): Promise<string | null> {
   const client = requireSupabase()
   const { data, error } = await client.from('site_settings').select('value').eq('key', key).maybeSingle()
@@ -28,20 +34,45 @@ export async function getSiteSetting(key: string): Promise<string | null> {
   return data?.value ? String(data.value).replace(/^"|"$/g, '') : null
 }
 
-export async function createBooking(data: BookingDraft & { id: string; bookingReference: string; status: BookingStatus }) {
+export async function listActiveAccommodations(): Promise<Accommodation[]> {
   const client = requireSupabase()
+  const { data, error } = await client
+    .from('accommodation_inventory')
+    .select('id, name, short_description, capacity, price_label, features, image')
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true })
+    .order('name', { ascending: true })
+  if (error) throw error
+  return (data ?? []).map(item => ({
+    id: item.id,
+    name: item.name,
+    shortDescription: item.short_description,
+    capacity: item.capacity,
+    priceLabel: item.price_label,
+    features: item.features,
+    image: item.image,
+  })) as Accommodation[]
+}
+
+export async function createBooking(
+  data: BookingDraft & { id: string; bookingReference: string; status: BookingStatus },
+  stays: Accommodation[] = accommodation,
+) {
+  const client = requireSupabase()
+  const booking = validateBookingDraft(data, stays)
+  if (data.status !== 'pending') throw new Error('A new booking request must start as pending.')
   const { error } = await client.from('bookings').insert({
     id: data.id,
     booking_reference: data.bookingReference,
-    accommodation_id: data.accommodationId,
-    check_in: data.checkIn,
-    check_out: data.checkOut,
-    guests: data.guests,
-    full_name: data.fullName.trim(),
-    email: data.email.trim().toLowerCase(),
-    phone: data.phone.trim(),
-    preferred_arrival: data.preferredArrival || null,
-    notes: data.notes.trim() || null,
+    accommodation_id: booking.accommodationId,
+    check_in: booking.checkIn,
+    check_out: booking.checkOut,
+    guests: booking.guests,
+    full_name: booking.fullName,
+    email: booking.email,
+    phone: booking.phone,
+    preferred_arrival: booking.preferredArrival || null,
+    notes: booking.notes || null,
     status: data.status,
   })
   if (error) throw error
@@ -67,9 +98,10 @@ export type SupabaseAdminBooking = {
   receipt_sent_at: string | null
   receipt_processing_at: string | null
   receipt_last_error: string | null
+  receipt_retry_requested_at: string | null
 }
 
-export async function listBookings(session?: Session) {
+export async function listBookings() {
   const client = requireSupabase()
   const { data, error } = await client.from('bookings').select('*').order('created_at', { ascending: false })
   if (error) throw error
@@ -80,6 +112,21 @@ export async function updateBookingStatus(id: string, status: BookingStatus) {
   const client = requireSupabase()
   const { error } = await client.from('bookings').update({ status }).eq('id', id)
   if (error) throw error
+}
+
+export async function requestBookingReceiptRetry(id: string) {
+  const client = requireSupabase()
+  const requestedAt = new Date().toISOString()
+  const { data, error } = await client.from('bookings')
+    .update({ receipt_retry_requested_at: requestedAt })
+    .eq('id', id)
+    .eq('status', 'confirmed')
+    .is('receipt_sent_at', null)
+    .select('id')
+    .maybeSingle()
+  if (error) throw error
+  if (!data?.id) throw new Error('This booking is no longer confirmed or its receipt was already sent.')
+  return requestedAt
 }
 
 export type AdminConversation = {
@@ -109,9 +156,41 @@ export async function listConversationMessages(conversationId: string) {
   return data as AdminMessage[]
 }
 
+export function subscribeToAdminMessages(
+  conversationId: string,
+  onInsert: (message: AdminMessage) => void,
+  onStatus?: (status: string) => void,
+) {
+  const client = requireSupabase()
+  return client.channel(`admin-support-messages:${conversationId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'support_messages',
+      filter: `conversation_id=eq.${conversationId}`,
+    }, payload => onInsert(payload.new as AdminMessage))
+    .subscribe(status => onStatus?.(status))
+}
+
+export function subscribeToAdminConversations(
+  onChange: () => void,
+  onStatus?: (status: string) => void,
+) {
+  const client = requireSupabase()
+  return client.channel('admin-support-conversations')
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'support_conversations',
+    }, onChange)
+    .subscribe(status => onStatus?.(status))
+}
+
 export async function sendStaffMessage(conversationId: string, text: string, adminName?: string | null) {
   const client = requireSupabase()
-  const { error } = await client.from('support_messages').insert({ conversation_id: conversationId, sender: 'staff', text: text.trim(), admin_name: adminName || null })
+  const message = normalizeSupportText(text, 2000)
+  if (!message) throw new Error('Please write a message before sending.')
+  const { error } = await client.from('support_messages').insert({ conversation_id: conversationId, sender: 'staff', text: message, admin_name: adminName ? normalizeSupportText(adminName, 120) : null })
   if (error) throw error
 }
 
@@ -150,13 +229,23 @@ export async function createSupportConversation(visitorToken: string) {
 
 export async function updateSupportVisitor(conversationId: string, visitorToken: string, contact: { name: string; email: string; phone: string }) {
   const client = requireSupabase()
-  const { error } = await client.rpc('update_support_visitor', { p_conversation_id: conversationId, p_visitor_token: visitorToken, p_visitor_name: contact.name || null, p_visitor_email: contact.email || null, p_visitor_phone: contact.phone || null })
+  const name = normalizeSupportText(contact.name, 120)
+  const email = normalizeSupportText(contact.email, 254).toLowerCase()
+  const phone = normalizeSupportText(contact.phone, 40)
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Please enter a valid email address.')
+  const phoneDigits = phone.replace(/\D/g, '')
+  if (phone && (!/^\+?[\d\s().-]+$/.test(phone) || phoneDigits.length < 7 || phoneDigits.length > 15)) {
+    throw new Error('Please enter a valid phone number.')
+  }
+  const { error } = await client.rpc('update_support_visitor', { p_conversation_id: conversationId, p_visitor_token: visitorToken, p_visitor_name: name || null, p_visitor_email: email || null, p_visitor_phone: phone || null })
   if (error) throw error
 }
 
 export async function addVisitorMessage(conversationId: string, visitorToken: string, text: string, sender: 'visitor' | 'bot') {
   const client = requireSupabase()
-  const { error } = await client.rpc('add_support_message', { p_conversation_id: conversationId, p_visitor_token: visitorToken, p_sender: sender, p_text: text })
+  const message = normalizeSupportText(text, 2000)
+  if (!message) throw new Error('Please write a message before sending.')
+  const { error } = await client.rpc('add_support_message', { p_conversation_id: conversationId, p_visitor_token: visitorToken, p_sender: sender, p_text: message })
   if (error) throw error
 }
 
@@ -213,7 +302,7 @@ export async function createReview(input: { fullName: string; rating: number; re
     rating: input.rating,
     review_text: reviewText,
     photo_data: photoData || null,
-    published: true,
+    published: false,
   })
   if (error) throw error
 }

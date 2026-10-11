@@ -21,7 +21,7 @@ import { SupportWidget } from './components/SupportWidget'
 import { SafeImage } from './components/SafeImage'
 import { ReviewsSection } from './components/ReviewsSection'
 import { accommodation, dailyMessage, faq } from './data/siteContent'
-import { getSiteSetting } from './services/supabase'
+import { getSiteSetting, listActiveAccommodations } from './services/supabase'
 
 const guideItems = [
   ['What to bring', 'Pack light for a simple province-style stay. Message the team for the latest checklist before you travel.'],
@@ -35,6 +35,8 @@ const encodedCampsiteLocation = encodeURIComponent(campsiteLocation)
 
 export default function App() {
   const [bookingOpen, setBookingOpen] = useState(false)
+  const [stays, setStays] = useState(accommodation)
+  const [inlineStayId, setInlineStayId] = useState(accommodation[0]?.id ?? '')
   const [presetStay, setPresetStay] = useState<string | undefined>(undefined)
   const [supportOpen, setSupportOpen] = useState(false)
   const [daily, setDaily] = useState(dailyMessage)
@@ -46,6 +48,24 @@ export default function App() {
       .then(value => { if (value) setDaily(value) })
       .catch(() => undefined)
   }, [])
+
+  useEffect(() => {
+    let mounted = true
+    void listActiveAccommodations()
+      .then(items => {
+        if (!mounted) return
+        setStays(items)
+        setInlineStayId(current => items.some(stay => stay.id === current) ? current : items[0]?.id ?? '')
+      })
+      .catch(() => undefined)
+    return () => { mounted = false }
+  }, [])
+
+  const rateSummary = stays.length === 1
+    ? stays[0].priceLabel
+    : stays.length
+      ? 'Rates confirmed with Malaya'
+      : 'Contact us for current rates'
 
   const openBooking = (stayId?: string) => {
     setPresetStay(stayId)
@@ -85,7 +105,7 @@ export default function App() {
             <div className="hero-actions">
               <button className="button button-light" onClick={() => scrollTo('malaya-story')}><span className="play-dot">▶</span> Silipin ang Malaya</button>
             </div>
-            <div className="hero-rate"><strong>From ₱999 for 2 guests</strong><span>22-hour stay · Nasugbu, Batangas</span></div>
+            <div className="hero-rate"><strong>{rateSummary}</strong><span>22-hour stay · Nasugbu, Batangas</span></div>
           </div>
           <div className="hero-note"><span className="eyebrow eyebrow-light">TODAY AT MALAYA</span><strong>{daily}</strong></div>
         </section>
@@ -94,7 +114,7 @@ export default function App() {
           <button onClick={() => openBooking()}><span>Check-in</span><strong>Select date</strong></button>
           <button onClick={() => openBooking()}><span>Check-out</span><strong>Select date</strong></button>
           <button onClick={() => openBooking()}><span>Guests</span><strong>2 guests</strong></button>
-          <button className="availability-submit" onClick={() => openBooking()}>Check availability <ArrowRight size={15} /></button>
+          <button className="availability-submit" onClick={() => openBooking()}>Ask about dates <ArrowRight size={15} /></button>
         </section>
 
         <section id="malaya-story" className="art-section shell">
@@ -109,12 +129,16 @@ export default function App() {
         <section id="stay" className="cabins-section shell-wide">
           <div className="cabins-heading">
             <div><p className="eyebrow">02 / THE CABINS</p><h2>Simpleng tuluyan mo.</h2></div>
-            <span>From ₱999 for 2 guests · 22-hour stay</span>
+            <span>{rateSummary} · 22-hour stay</span>
           </div>
-          <div className="cabins-grid">
-            <article><div className="cabin-photo"><SafeImage src="/images/cabin-exterior.webp" alt="Tahanan bamboo cabin" /></div><div className="cabin-caption"><strong>Tahanan</strong><button onClick={() => openBooking('kanlungan-cabin')}>View rate <ArrowRight size={13} /></button></div></article>
-            <article className="featured"><div className="cabin-photo"><SafeImage src="/images/cabin-interior.webp" alt="Kanlungan Cabin" /></div><div className="cabin-caption"><strong>Kanlungan</strong><button onClick={() => openBooking('kanlungan-cabin')}>View rate <ArrowRight size={13} /></button></div></article>
-            <article><div className="cabin-photo"><SafeImage src="/images/cabin-interior-detail.webp" alt="Family hut interior" /></div><div className="cabin-caption"><strong>Family hut</strong><button onClick={() => openBooking('kanlungan-cabin')}>View rate <ArrowRight size={13} /></button></div></article>
+          <div className={`cabins-grid ${stays.length === 1 ? 'cabins-grid-single' : ''}`}>
+            {stays.map((stay, index) => (
+              <article className={index === 1 ? 'featured' : ''} key={stay.id}>
+                <div className="cabin-photo"><SafeImage src={stay.image} alt={`${stay.name} at Malaya Campsite`} /></div>
+                <div className="cabin-caption"><strong>{stay.name}</strong><button onClick={() => openBooking(stay.id)}>Request this stay <ArrowRight size={13} /></button></div>
+              </article>
+            ))}
+            {!stays.length ? <p className="cabins-empty">Please contact Malaya for current stay options.</p> : null}
           </div>
         </section>
 
@@ -122,16 +146,16 @@ export default function App() {
           <div className="booking-inline-main">
             <p className="eyebrow">03 / BOOKING</p>
             <h2>Simula ng pahinga mo</h2>
-            <p>Choose dates to see available cabins.</p>
+            <p>Choose dates and the Malaya team will confirm availability.</p>
             <div className="inline-date-row">
               <button onClick={() => openBooking()}><span>Check-in</span><strong>Select date</strong></button>
               <button onClick={() => openBooking()}><span>Check-out</span><strong>Select date</strong></button>
               <button onClick={() => openBooking()}><span>Guests</span><strong>2 guests</strong></button>
             </div>
-            <button className="button button-primary" onClick={() => openBooking('kanlungan-cabin')}>Review booking <ArrowRight size={15} /></button>
+            <button className="button button-primary" onClick={() => openBooking(inlineStayId || undefined)} disabled={!inlineStayId}>Review booking <ArrowRight size={15} /></button>
           </div>
           <div className="booking-inline-form">
-            <label>Selected cabin<select defaultValue=""><option value="">Select a cabin</option><option value="kanlungan-cabin">Kanlungan Cabin</option></select></label>
+            <label>Selected cabin<select value={inlineStayId} onChange={event => setInlineStayId(event.target.value)} disabled={!stays.length}><option value="">Select a cabin</option>{stays.map(stay => <option key={stay.id} value={stay.id}>{stay.name}</option>)}</select></label>
             <label>Full name<input placeholder="Your full name" readOnly /></label>
             <label>Mobile number<input placeholder="09XX XXX XXXX" readOnly /></label>
             <label>Email<input placeholder="your@email.com" readOnly /></label>
@@ -203,7 +227,7 @@ export default function App() {
           <div className="faq-grid">{faq.slice(0, 3).map(item => <div className="faq-item" key={item.q}><button onClick={() => setOpenFaq(openFaq === item.q ? null : item.q)}><span>{item.q}</span><Plus size={15} className={openFaq === item.q ? 'rotate' : ''} /></button>{openFaq === item.q ? <p>{item.a}</p> : null}</div>)}</div>
         </section>
 
-        <section className="final-cta shell-wide"><div><p className="eyebrow eyebrow-light">09 / COME AS YOU ARE</p><h2>You don’t have to<br />earn your rest.</h2><p>Dito, pwedeng-pwede magpahinga.</p><button className="button button-light" onClick={() => openBooking()}>Check available dates <ArrowRight size={15} /></button></div><div className="final-cta-image"><SafeImage src="/images/waterfall.webp" alt="Nature near Malaya Campsite" /></div></section>
+        <section className="final-cta shell-wide"><div><p className="eyebrow eyebrow-light">09 / COME AS YOU ARE</p><h2>You don’t have to<br />earn your rest.</h2><p>Dito, pwedeng-pwede magpahinga.</p><button className="button button-light" onClick={() => openBooking()}>Ask about available dates <ArrowRight size={15} /></button></div><div className="final-cta-image"><SafeImage src="/images/waterfall.webp" alt="Nature near Malaya Campsite" /></div></section>
 
         <section id="contact" className="contact-strip shell">
           <div className="contact-item"><MapPin size={17} /><div><span className="eyebrow">LOCATION</span><strong>{campsiteLocation}</strong></div></div>
@@ -218,7 +242,7 @@ export default function App() {
         </footer>
       </main>
 
-      <BookingModal open={bookingOpen} onClose={() => setBookingOpen(false)} stays={accommodation} presetStay={presetStay} />
+      <BookingModal open={bookingOpen} onClose={() => setBookingOpen(false)} stays={stays} presetStay={presetStay} />
       <SupportWidget open={supportOpen} onToggle={() => setSupportOpen(value => !value)} />
     </div>
   )

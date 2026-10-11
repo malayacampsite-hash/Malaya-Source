@@ -23,6 +23,57 @@ $$;
 
 grant execute on function public.is_malaya_admin() to anon, authenticated;
 
+create table if not exists public.accommodation_inventory (
+  id text primary key,
+  name text not null,
+  short_description text not null default '',
+  capacity integer not null check (capacity between 1 and 50),
+  price_label text not null default 'Contact for current rates',
+  features text[] not null default '{}',
+  image text not null default '/images/hero.webp',
+  sort_order integer not null default 0,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+alter table public.accommodation_inventory
+  add column if not exists short_description text not null default '',
+  add column if not exists price_label text not null default 'Contact for current rates',
+  add column if not exists features text[] not null default '{}',
+  add column if not exists image text not null default '/images/hero.webp',
+  add column if not exists sort_order integer not null default 0;
+
+insert into public.accommodation_inventory(id, name, short_description, capacity, price_label, features, image, sort_order)
+values (
+  'kanlungan-cabin',
+  'Kanlungan Cabin',
+  'A private bamboo cabin for a quieter stay close to nature.',
+  2,
+  'Rate confirmed with your booking request',
+  array['2 guests', '22-hour stay', 'Breakfast', 'Kapeng Barako', 'Private cabin'],
+  '/images/cabin-interior.webp',
+  1
+)
+on conflict (id) do nothing;
+
+alter table public.accommodation_inventory enable row level security;
+
+create or replace function public.accommodation_accepts_guests(p_accommodation_id text, p_guests integer)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.accommodation_inventory
+    where id = p_accommodation_id and is_active and capacity >= p_guests
+  );
+$$;
+
+revoke all on function public.accommodation_accepts_guests(text, integer) from public;
+grant execute on function public.accommodation_accepts_guests(text, integer) to anon, authenticated;
+
 create table if not exists public.bookings (
   id uuid primary key default gen_random_uuid(),
   booking_reference text not null unique,
@@ -88,6 +139,29 @@ create table if not exists public.support_messages (
 
 create index if not exists support_messages_conversation_idx on public.support_messages(conversation_id, created_at);
 
+-- Staff chat uses authenticated Postgres Changes subscriptions. Guest chat stays on
+-- token-checked RPCs so visitor tokens never need to be exposed as Realtime claims.
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    execute 'create publication supabase_realtime';
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'support_conversations'
+  ) then
+    execute 'alter publication supabase_realtime add table public.support_conversations';
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'support_messages'
+  ) then
+    execute 'alter publication supabase_realtime add table public.support_messages';
+  end if;
+end $$;
+
 create table if not exists public.site_settings (
   key text primary key,
   value jsonb not null,
@@ -144,10 +218,34 @@ drop policy if exists "admins read admin users" on public.admin_users;
 create policy "admins read admin users" on public.admin_users
 for select to authenticated using (public.is_malaya_admin());
 
+drop policy if exists "public read active accommodation inventory" on public.accommodation_inventory;
+create policy "public read active accommodation inventory" on public.accommodation_inventory
+for select to anon, authenticated using (is_active = true);
+
+drop policy if exists "admins manage accommodation inventory" on public.accommodation_inventory;
+create policy "admins manage accommodation inventory" on public.accommodation_inventory
+for all to authenticated using (public.is_malaya_admin()) with check (public.is_malaya_admin());
+
 drop policy if exists "public create pending bookings" on public.bookings;
 create policy "public create pending bookings" on public.bookings
 for insert to anon, authenticated
-with check (status = 'pending');
+with check (
+  status = 'pending'
+  and public.accommodation_accepts_guests(accommodation_id, guests)
+  and check_in >= (now() at time zone 'Asia/Manila')::date
+  and char_length(trim(booking_reference)) between 1 and 40
+  and full_name = trim(full_name)
+  and char_length(trim(full_name)) between 1 and 120
+  and email = trim(email)
+  and char_length(trim(email)) between 3 and 254
+  and lower(trim(email)) ~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'
+  and phone = trim(phone)
+  and char_length(trim(phone)) between 7 and 40
+  and phone ~ '^[+]?[0-9 ()().-]+$'
+  and char_length(regexp_replace(phone, '[^0-9]', '', 'g')) between 7 and 15
+  and (preferred_arrival is null or preferred_arrival ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$')
+  and (notes is null or char_length(notes) <= 2000)
+);
 
 drop policy if exists "admins read bookings" on public.bookings;
 create policy "admins read bookings" on public.bookings
@@ -320,7 +418,8 @@ alter table public.bookings
   add column if not exists sheet_sync_error text,
   add column if not exists receipt_sent_at timestamptz,
   add column if not exists receipt_processing_at timestamptz,
-  add column if not exists receipt_last_error text;
+  add column if not exists receipt_last_error text,
+  add column if not exists receipt_retry_requested_at timestamptz;
 
 create table if not exists public.site_reviews (
   id uuid primary key default gen_random_uuid(),
@@ -328,13 +427,16 @@ create table if not exists public.site_reviews (
   rating smallint not null check (rating between 1 and 5),
   review_text text not null check (char_length(trim(review_text)) between 1 and 2000),
   photo_data text,
-  published boolean not null default true,
+  published boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 alter table public.site_reviews
   add column if not exists photo_data text;
+
+alter table public.site_reviews
+  alter column published set default false;
 
 alter table public.site_reviews
   drop constraint if exists site_reviews_photo_data_valid;
@@ -364,9 +466,10 @@ for select to anon, authenticated
 using (published = true);
 
 drop policy if exists "public submit published reviews" on public.site_reviews;
-create policy "public submit published reviews" on public.site_reviews
+drop policy if exists "public submit unpublished reviews" on public.site_reviews;
+create policy "public submit unpublished reviews" on public.site_reviews
 for insert to anon, authenticated
-with check (published = true);
+with check (published = false);
 
 drop policy if exists "admins read all reviews" on public.site_reviews;
 create policy "admins read all reviews" on public.site_reviews
@@ -385,4 +488,5 @@ for delete to authenticated
 using (public.is_malaya_admin());
 
 -- The visitor review flow deliberately does not require an account.
+-- New reviews stay unpublished until a Malaya admin approves them.
 -- Reviews are stored as plain text and the frontend renders them as text only.

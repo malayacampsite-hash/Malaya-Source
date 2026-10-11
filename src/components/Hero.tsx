@@ -11,7 +11,7 @@ export function Hero({ onBook, dailyMessage }: Props) {
         <h1>A softer place to <em>stay awhile.</em></h1>
         <p className="hero-lede">Slow mornings, green views, and a campsite made for people who want less noise and more room to breathe.</p>
         <div className="hero-actions">
-          <button className="button button-primary" onClick={onBook}><CalendarDays size={17} /> Check availability</button>
+          <button className="button button-primary" onClick={onBook}><CalendarDays size={17} /> Ask about dates</button>
           <a className="button button-quiet" href="#stays">Explore stays <ArrowDown size={16} /></a>
         </div>
         <div className="hero-notes">

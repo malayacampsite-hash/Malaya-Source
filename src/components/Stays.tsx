@@ -8,7 +8,7 @@ type Props = { stays: Accommodation[]; onBook: (stayId?: string) => void }
 export function Stays({ stays, onBook }: Props) {
   return (
     <section id="stays" className="section-pad stays">
-      <SectionHeading eyebrow="STAY YOUR WAY" title="Choose a space that fits the trip." children="Rates shown are starting references for the draft experience and can be connected to the campsite's live pricing later." />
+      <SectionHeading eyebrow="STAY YOUR WAY" title="Choose a space that fits the trip." children="The Malaya team confirms current rates and availability with each booking request." />
       <div className="stay-grid">
         {stays.map((stay, index) => (
           <article className={`stay-card ${index === 1 ? 'stay-featured' : ''}`} key={stay.id}>

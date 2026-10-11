@@ -1,15 +1,19 @@
 import { withSupabase } from 'npm:@supabase/server@^1'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import { parseSheetRange } from './sheetRange.ts'
 
 const SHEET_ID = Deno.env.get('GOOGLE_SHEET_ID') ?? ''
 const SHEET_RANGE = Deno.env.get('GOOGLE_SHEET_RANGE') ?? 'Bookings!A:O'
-const SHEET_NAME = (SHEET_RANGE.split('!')[0] || 'Bookings').replace(/^'+|'+$/g, '')
 const GMAIL_SENDER = Deno.env.get('GMAIL_SENDER_EMAIL') ?? 'malayacampsite@gmail.com'
 const GOOGLE_CLIENT_ID = Deno.env.get('GOOGLE_CLIENT_ID') ?? ''
 const GOOGLE_CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET') ?? ''
 const GOOGLE_REFRESH_TOKEN = Deno.env.get('GOOGLE_REFRESH_TOKEN') ?? ''
 const PUBLIC_SITE_URL = (Deno.env.get('MALAYA_PUBLIC_SITE_URL') ?? '').replace(/\/$/, '')
 const LOGO_URL = Deno.env.get('MALAYA_LOGO_URL') || (PUBLIC_SITE_URL ? `${PUBLIC_SITE_URL}/images/logo.png` : '')
+const RECEIPT_CLAIM_TTL_MS = 15 * 60 * 1000
+
+const { sheetName: SHEET_NAME, startColumn: SHEET_START_COLUMN, endColumn: SHEET_END_COLUMN } = parseSheetRange(SHEET_RANGE)
+const SHEET_PREFIX = `'${SHEET_NAME.replace(/'/g, "''")}'!`
 type BookingRecord = {
   id: string
   booking_reference: string
@@ -31,6 +35,8 @@ type BookingRecord = {
   receipt_sent_at?: string | null
   receipt_processing_at?: string | null
   receipt_last_error?: string | null
+  receipt_retry_requested_at?: string | null
+  accommodation_name?: string
 }
 
 type WebhookPayload = {
@@ -53,11 +59,10 @@ function safeSheetCell(value: unknown) {
   return /^[=+\-@]/.test(text) ? `'${text}` : text
 }
 
-function stayName(id: string) {
+function stayName(id: string, name?: string | null) {
+  if (name?.trim()) return name.trim()
   const names: Record<string, string> = {
     'kanlungan-cabin': 'Kanlungan Cabin',
-    tahanan: 'Tahanan',
-    'family-hut': 'Family hut',
   }
   return names[id] ?? id
 }
@@ -66,7 +71,7 @@ function bookingRow(booking: BookingRecord) {
   return [
     safeSheetCell(booking.id),
     safeSheetCell(booking.booking_reference),
-    safeSheetCell(stayName(booking.accommodation_id)),
+    safeSheetCell(stayName(booking.accommodation_id, booking.accommodation_name)),
     safeSheetCell(booking.check_in),
     safeSheetCell(booking.check_out),
     safeSheetCell(booking.guests),
@@ -108,12 +113,19 @@ async function googleAccessToken() {
 }
 
 async function ensureSheetHeader(token: string) {
-  const headerRange = `${SHEET_NAME}!A1:O1`
+  const headerRange = `${SHEET_PREFIX}${SHEET_START_COLUMN}1:${SHEET_END_COLUMN}1`
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(SHEET_ID)}/values/${encodeURIComponent(headerRange)}`
   const read = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
   if (!read.ok) throw new Error(`Google Sheets read failed (${read.status}).`)
   const data = await read.json() as { values?: string[][] }
-  if (data.values?.[0]?.length) return
+  const existingHeaders = data.values?.[0] ?? []
+  if (existingHeaders.length) {
+    const expectedHeaders = sheetHeaders()
+    if (expectedHeaders.some((header, index) => existingHeaders[index] !== header)) {
+      throw new Error(`The header row in ${SHEET_NAME} does not match the booking automation columns. Update it before syncing bookings.`)
+    }
+    return
+  }
   const update = await fetch(`${url}?valueInputOption=RAW`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -124,7 +136,7 @@ async function ensureSheetHeader(token: string) {
 
 function extractRowNumber(updatedRange: string | undefined) {
   if (!updatedRange) return null
-  const match = updatedRange.match(/!\$?A\$?(\d+):/)
+  const match = updatedRange.match(/!\$?[A-Z]+\$?(\d+):\$?[A-Z]+\$?\d+/i)
   return match ? Number(match[1]) : null
 }
 
@@ -141,7 +153,7 @@ async function appendBookingToSheet(token: string, booking: BookingRecord) {
 }
 
 async function updateBookingSheetRow(token: string, booking: BookingRecord, rowNumber: number) {
-  const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`
+  const range = `${SHEET_PREFIX}${SHEET_START_COLUMN}${rowNumber}:${SHEET_END_COLUMN}${rowNumber}`
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(SHEET_ID)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`
   const response = await fetch(url, {
     method: 'PUT',
@@ -153,7 +165,7 @@ async function updateBookingSheetRow(token: string, booking: BookingRecord, rowN
 }
 
 async function findBookingRowByReference(token: string, bookingReference: string) {
-  const range = `${SHEET_NAME}!A:O`
+  const range = `${SHEET_PREFIX}${SHEET_START_COLUMN}:${SHEET_END_COLUMN}`
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(SHEET_ID)}/values/${encodeURIComponent(range)}?majorDimension=ROWS`
   const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
   const payload = await response.json() as { values?: string[][]; error?: { message?: string } }
@@ -214,7 +226,7 @@ function htmlReceipt(booking: BookingRecord) {
 
   const headerMeta = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td width="50%" style="padding:0 12px 0 0;vertical-align:top"><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Reference</div><div style="font-size:17px;line-height:1.35;font-weight:700;color:#183b2b;margin-top:5px;word-break:break-word">${escapeHtml(booking.booking_reference)}</div></td><td width="50%" style="padding:0 0 0 12px;vertical-align:top;text-align:right"><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Status</div><div style="font-size:17px;line-height:1.35;font-weight:700;color:#2e6a48;margin-top:5px">Confirmed</div></td></tr></table>`
 
-  const details = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #d8ded5;border-bottom:1px solid #d8ded5;margin-top:26px">${emailDetailRow('Accommodation', escapeHtml(stayName(booking.accommodation_id)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-in', escapeHtml(formatDate(booking.check_in)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-out', escapeHtml(formatDate(booking.check_out)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Guests', escapeHtml(`${booking.guests} guest${booking.guests === 1 ? '' : 's'}`))}${booking.preferred_arrival ? `<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Preferred arrival', escapeHtml(booking.preferred_arrival))}` : ''}</table>`
+  const details = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #d8ded5;border-bottom:1px solid #d8ded5;margin-top:26px">${emailDetailRow('Accommodation', escapeHtml(stayName(booking.accommodation_id, booking.accommodation_name)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-in', escapeHtml(formatDate(booking.check_in)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-out', escapeHtml(formatDate(booking.check_out)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Guests', escapeHtml(`${booking.guests} guest${booking.guests === 1 ? '' : 's'}`))}${booking.preferred_arrival ? `<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Preferred arrival', escapeHtml(booking.preferred_arrival))}` : ''}</table>`
 
   return `<!doctype html><html><body style="margin:0;background:#eef0e9;font-family:Arial,Helvetica,sans-serif;color:#203127"><div style="padding:30px 12px"><div style="max-width:620px;margin:0 auto;background:#fffef8;border:1px solid #d8ded5"><div style="padding:26px 28px;border-bottom:1px solid #d8ded5;background:#f7f8f2">${logo}<div style="margin-top:24px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#6c766f;font-weight:700">Booking confirmation</div><div style="margin-top:7px;font-size:30px;line-height:1.08;font-family:Georgia,serif;color:#173b2b">Your stay is confirmed.</div><div style="margin-top:10px;font-size:14px;line-height:1.7;color:#65736a">Thank you for choosing Malaya Campsite. We look forward to welcoming you to Nasugbu, Batangas.</div></div><div style="padding:28px">${headerMeta}${details}${note}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px"><tr><td style="padding:17px 18px;background:#173d2c;color:#fff"><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#cfe0d3;font-weight:700">At a glance</div><div style="margin-top:7px;font-size:14px;line-height:1.7">22-hour stay · Nasugbu, Batangas</div></td></tr></table></div><div style="padding:20px 28px;border-top:1px solid #d8ded5;background:#f7f8f2;color:#6b776f;font-size:12px;line-height:1.7"><strong style="color:#1f392b">Malaya Campsite</strong><br/>Pulo, Brgy. Kaylaway, Nasugbu, Batangas<br/><a href="mailto:${GMAIL_SENDER}" style="color:#1f5b40;text-decoration:none">${GMAIL_SENDER}</a><br/><span>Keep this email for your booking details.</span><div style="margin-top:12px;font-size:10px;color:#87928a">${escapeHtml(formatDateTime(booking.created_at))}</div></div></div></div></body></html>`
 }
@@ -291,7 +303,7 @@ function bookingMeaningfullyChanged(oldRecord: BookingRecord | null, record: Boo
   if (!oldRecord) return true
   const fields: (keyof BookingRecord)[] = [
     'booking_reference', 'accommodation_id', 'check_in', 'check_out', 'guests', 'full_name',
-    'email', 'phone', 'preferred_arrival', 'notes', 'status', 'created_at',
+    'email', 'phone', 'preferred_arrival', 'notes', 'status', 'created_at', 'receipt_retry_requested_at',
   ]
   return fields.some(field => oldRecord[field] !== record[field])
 }
@@ -301,32 +313,43 @@ async function writeAutomationMetadata(
   id: string,
   patch: Record<string, unknown>,
 ) {
-  await supabaseAdmin.from('bookings').update(patch).eq('id', id)
+  const { error } = await supabaseAdmin.from('bookings').update(patch).eq('id', id)
+  if (error) throw new Error(`Could not save booking automation metadata: ${error.message}`)
 }
 
 async function claimReceipt(
   supabaseAdmin: SupabaseClient,
   id: string,
 ) {
+  const staleBefore = new Date(Date.now() - RECEIPT_CLAIM_TTL_MS).toISOString()
   const { data, error } = await supabaseAdmin
     .from('bookings')
-    .update({ receipt_processing_at: new Date().toISOString() })
+    .update({ receipt_processing_at: new Date().toISOString(), receipt_last_error: null })
     .eq('id', id)
     .is('receipt_sent_at', null)
-    .is('receipt_processing_at', null)
+    .or(`receipt_processing_at.is.null,receipt_processing_at.lt.${staleBefore}`)
     .select('id')
     .maybeSingle()
-  return !error && Boolean(data?.id)
+  if (error) throw new Error(`Could not claim booking receipt: ${error.message}`)
+  return Boolean(data?.id)
 }
 
 async function processBooking(
   payload: WebhookPayload,
   supabaseAdmin: SupabaseClient,
 ) {
-  const booking = payload.record
-  if (!booking || payload.table !== 'bookings' || payload.schema !== 'public') return { ignored: true }
+  const receivedBooking = payload.record
+  if (!receivedBooking || payload.table !== 'bookings' || payload.schema !== 'public') return { ignored: true }
   if (payload.type === 'DELETE') return { ignored: true }
-  if (payload.type === 'UPDATE' && !bookingMeaningfullyChanged(payload.old_record, booking)) return { ignored: true }
+  if (payload.type === 'UPDATE' && !bookingMeaningfullyChanged(payload.old_record, receivedBooking)) return { ignored: true }
+
+  const { data: stay, error: stayError } = await supabaseAdmin
+    .from('accommodation_inventory')
+    .select('name')
+    .eq('id', receivedBooking.accommodation_id)
+    .maybeSingle()
+  if (stayError) throw new Error(`Could not load the booking stay name: ${stayError.message}`)
+  const booking: BookingRecord = { ...receivedBooking, accommodation_name: stay?.name ?? receivedBooking.accommodation_id }
 
   const result: Record<string, unknown> = { booking_id: booking.id, spreadsheet: 'skipped', receipt: 'skipped' }
 
@@ -345,7 +368,19 @@ async function processBooking(
   }
 
   const becameConfirmed = booking.status === 'confirmed' && payload.old_record?.status !== 'confirmed'
-  if (becameConfirmed && !booking.receipt_sent_at) {
+  const receiptClaimIsStale = Boolean(
+    booking.receipt_processing_at
+    && new Date(booking.receipt_processing_at).getTime() < Date.now() - RECEIPT_CLAIM_TTL_MS,
+  )
+  const shouldAttemptReceipt = booking.status === 'confirmed'
+    && !booking.receipt_sent_at
+    && (
+      becameConfirmed
+      || Boolean(booking.receipt_last_error)
+      || receiptClaimIsStale
+      || payload.old_record?.receipt_retry_requested_at !== booking.receipt_retry_requested_at
+    )
+  if (shouldAttemptReceipt) {
     const claimed = await claimReceipt(supabaseAdmin, booking.id)
     if (claimed) {
       try {

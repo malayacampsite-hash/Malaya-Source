@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Bot, MessageCircle, Send, UserRound, X } from 'lucide-react'
 import { faq } from '../data/siteContent'
 import type { SupportMessage } from '../types'
@@ -10,10 +10,35 @@ const STORAGE_KEY = 'malaya-support-conversation-v3'
 
 function makeToken() { return `${crypto.randomUUID()}-${crypto.randomUUID()}-${Date.now()}` }
 
+function readStoredConversation(): StoredConversation | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const value: unknown = JSON.parse(raw)
+    if (typeof value !== 'object' || value === null) return null
+    const candidate = value as Partial<StoredConversation>
+    return typeof candidate.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.id)
+      && typeof candidate.token === 'string' && candidate.token.length >= 20 && candidate.token.length <= 200
+      ? { id: candidate.id, token: candidate.token }
+      : null
+  } catch {
+    return null
+  }
+}
+
+function storeConversation(value: StoredConversation | null) {
+  try {
+    if (value) localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+    else localStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // Keep the current support session usable when browser storage is disabled.
+  }
+}
+
 export function SupportWidget({ open, onToggle }: Props) {
-  const [conversation, setConversation] = useState<StoredConversation | null>(() => {
-    try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) as StoredConversation : null } catch { return null }
-  })
+  const [conversation, setConversation] = useState<StoredConversation | null>(readStoredConversation)
+  const conversationRef = useRef<StoredConversation | null>(conversation)
+  const pendingConversationRef = useRef<Promise<StoredConversation> | null>(null)
   const [mode, setMode] = useState<'bot' | 'staff'>('bot')
   const [messages, setMessages] = useState<SupportMessage[]>([])
   const [name, setName] = useState('')
@@ -22,6 +47,19 @@ export function SupportWidget({ open, onToggle }: Props) {
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const actionBusyRef = useRef(false)
+
+  const beginAction = () => {
+    if (actionBusyRef.current) return false
+    actionBusyRef.current = true
+    setBusy(true)
+    return true
+  }
+
+  const endAction = () => {
+    actionBusyRef.current = false
+    setBusy(false)
+  }
 
   const loadMessages = async (current: StoredConversation) => {
     const rows = await getVisitorMessages(current.id, current.token)
@@ -29,14 +67,51 @@ export function SupportWidget({ open, onToggle }: Props) {
   }
 
   const ensureConversation = async () => {
-    if (conversation) return conversation
-    const token = makeToken()
-    const result = await createSupportConversation(token)
-    const next = result[0] ? { id: result[0].id, token: result[0].visitor_token || token } : null
-    if (!next) throw new Error('Support could not start a conversation.')
-    setConversation(next)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
-    return next
+    if (conversationRef.current) return conversationRef.current
+    if (pendingConversationRef.current) return pendingConversationRef.current
+    const pending = (async () => {
+      const token = makeToken()
+      const result = await createSupportConversation(token)
+      const next = result[0] ? { id: result[0].id, token: result[0].visitor_token || token } : null
+      if (!next) throw new Error('Support could not start a conversation.')
+      conversationRef.current = next
+      setConversation(next)
+      storeConversation(next)
+      return next
+    })()
+    pendingConversationRef.current = pending
+    try {
+      return await pending
+    } finally {
+      if (pendingConversationRef.current === pending) pendingConversationRef.current = null
+    }
+  }
+
+  const replaceConversation = async (staleId: string) => {
+    if (conversationRef.current && conversationRef.current.id !== staleId) return conversationRef.current
+    conversationRef.current = null
+    setConversation(null)
+    storeConversation(null)
+    setMessages([])
+    setMode('bot')
+    return ensureConversation()
+  }
+
+  const refreshConversation = async (current: StoredConversation, hydrateContact = false) => {
+    let active = current
+    let state = await getSupportState(active.id, active.token)
+    if (!state[0] || state[0].status === 'closed') {
+      active = await replaceConversation(current.id)
+      state = await getSupportState(active.id, active.token)
+    }
+    if (!state[0]) throw new Error('Support could not restore this conversation. Please try again.')
+    setMode(state[0].mode)
+    if (hydrateContact || active.id !== current.id) {
+      setName(state[0].visitor_name ?? '')
+      setEmail(state[0].visitor_email ?? '')
+      setPhone(state[0].visitor_phone ?? '')
+    }
+    await loadMessages(active)
   }
 
   useEffect(() => {
@@ -45,21 +120,14 @@ export function SupportWidget({ open, onToggle }: Props) {
       try {
         setError('')
         const current = await ensureConversation()
-        const state = await getSupportState(current.id, current.token)
-        if (state[0]) {
-          setMode(state[0].mode)
-          setName(state[0].visitor_name ?? '')
-          setEmail(state[0].visitor_email ?? '')
-          setPhone(state[0].visitor_phone ?? '')
-        }
-        await loadMessages(current)
+        await refreshConversation(current, true)
       } catch (err) { setError(err instanceof Error ? err.message : 'Support is temporarily unavailable.') }
     })()
   }, [open])
 
   useEffect(() => {
     if (!open || !conversation) return
-    const timer = window.setInterval(() => { void loadMessages(conversation).catch(() => undefined) }, 3000)
+    const timer = window.setInterval(() => { void refreshConversation(conversation).catch(() => undefined) }, 3000)
     return () => window.clearInterval(timer)
   }, [open, conversation])
 
@@ -68,20 +136,21 @@ export function SupportWidget({ open, onToggle }: Props) {
   }
 
   const ask = async (question: string) => {
-    if (busy) return
+    if (!beginAction()) return
     const answer = faq.find(item => item.q === question)?.a ?? 'I can help with booking, the cabin, and the Malaya experience.'
-    setBusy(true); setError('')
+    setError('')
     try {
       const current = await ensureConversation()
       await addVisitorMessage(current.id, current.token, question, 'visitor')
       await addVisitorMessage(current.id, current.token, answer, 'bot')
       await loadMessages(current)
     } catch (err) { setError(err instanceof Error ? err.message : 'We could not send that message.') }
-    finally { setBusy(false) }
+    finally { endAction() }
   }
 
   const requestStaff = async () => {
-    setBusy(true); setError('')
+    if (!beginAction()) return
+    setError('')
     try {
       const current = await ensureConversation()
       await persistContact(current)
@@ -91,13 +160,13 @@ export function SupportWidget({ open, onToggle }: Props) {
       setMode('staff')
       await loadMessages(current)
     } catch (err) { setError(err instanceof Error ? err.message : 'We could not switch to staff support.') }
-    finally { setBusy(false) }
+    finally { endAction() }
   }
 
   const send = async () => {
     const clean = message.trim()
-    if (!clean || busy) return
-    setBusy(true); setError('')
+    if (!clean || !beginAction()) return
+    setError('')
     try {
       const current = await ensureConversation()
       await persistContact(current)
@@ -106,7 +175,7 @@ export function SupportWidget({ open, onToggle }: Props) {
       await loadMessages(current)
       setMessage('')
     } catch (err) { setError(err instanceof Error ? err.message : 'We could not send your message.') }
-    finally { setBusy(false) }
+    finally { endAction() }
   }
 
   return <>
@@ -115,9 +184,9 @@ export function SupportWidget({ open, onToggle }: Props) {
       <div className="support-head"><div><span className="support-badge"><span /> Live guest support</span><h3>How can we help?</h3></div><button className="support-close" onClick={onToggle} aria-label="Close"><X size={18} /></button></div>
       <div className="support-mode"><span>{mode === 'bot' ? <><Bot size={13} /> Assistant</> : <><UserRound size={13} /> Staff queue</>}</span><button disabled={busy || mode === 'staff'} onClick={() => void requestStaff()}>{mode === 'bot' ? 'Talk to staff' : 'Staff requested'}</button></div>
       <div className="support-messages">{messages.map(m => <div key={m.id} className={`support-message ${m.sender}`}><small>{m.sender === 'visitor' ? 'You' : m.sender === 'bot' ? 'Malaya assistant' : 'Malaya staff'}</small><span>{m.text}</span></div>)}</div>
-      {mode === 'bot' ? <div className="faq-row">{faq.map(item => <button key={item.q} onClick={() => void ask(item.q)} disabled={busy}>{item.q}</button>)}</div> : <div className="support-details"><input placeholder="Name" value={name} onChange={e => setName(e.target.value)} /><input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} /><input placeholder="Phone" value={phone} onChange={e => setPhone(e.target.value)} /></div>}
+      {mode === 'bot' ? <div className="faq-row">{faq.map(item => <button key={item.q} onClick={() => void ask(item.q)} disabled={busy}>{item.q}</button>)}</div> : <div className="support-details"><input placeholder="Name" value={name} onChange={e => setName(e.target.value)} maxLength={120} /><input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} maxLength={254} /><input placeholder="Phone" value={phone} onChange={e => setPhone(e.target.value)} maxLength={40} /></div>}
       {error ? <p className="support-error">{error}</p> : null}
-      <div className="support-composer"><input placeholder={mode === 'staff' ? 'Write to the team…' : 'Ask a question…'} value={message} onChange={e => setMessage(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void send() }} /><button onClick={() => void send()} disabled={busy || !message.trim()} aria-label="Send"><Send size={15} /></button></div>
+      <div className="support-composer"><input placeholder={mode === 'staff' ? 'Write to the team…' : 'Ask a question…'} value={message} onChange={e => setMessage(e.target.value)} maxLength={2000} onKeyDown={e => { if (e.key === 'Enter') void send() }} /><button onClick={() => void send()} disabled={busy || !message.trim()} aria-label="Send"><Send size={15} /></button></div>
       <p className="support-foot">Your conversation is securely recorded in Supabase so staff can continue where the assistant left off.</p>
     </aside> : null}
   </>

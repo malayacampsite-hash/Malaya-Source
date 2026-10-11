@@ -20,7 +20,7 @@ Examples from the reference include:
 - "You don’t have to keep up with the world today."
 - "Traditional province-style camping. A slow living escape."
 - "Silipin ang Malaya"
-- "From ₱999 for 2 guests"
+- "Rates confirmed with Malaya at booking"
 - "22-hour stay · Nasugbu, Batangas"
 - "The Art of Doing Nothing."
 - "Kape, walang minamadali."
@@ -40,15 +40,18 @@ Examples from the reference include:
 Run the complete `supabase-schema.sql` in the Supabase SQL Editor. It includes:
 
 - booking tables and status constraints
+- active accommodation inventory used to enforce guest capacity in database inserts
 - admin authorization and RLS
 - visitor-token customer service RPCs
 - homepage message storage
 - booking automation metadata
 - `site_reviews` for the account-free review flow
-- public insert/select policies for published reviews
+- public submissions stay unpublished until admin approval; public reads return only published reviews
 - admin review moderation (publish/hide/delete)
 
-Public review submissions require only a full name, 1-5 star rating, and review text. No Supabase account is required. The frontend renders review text as React text nodes only; it does not use `dangerouslySetInnerHTML`. Inputs are normalized and length-limited before submission, and the database enforces length/rating constraints.
+The public stay cards, booking selector, and staff booking labels read from `accommodation_inventory`. Its seeded Kanlungan row is the database-side source for active status and guest capacity; `src/data/siteContent.ts` is used as the local fallback when Supabase is unavailable.
+
+Public review submissions require only a full name, 1-5 star rating, and review text. No Supabase account is required. New reviews remain hidden until a staff member publishes them. The frontend renders review text as React text nodes only; it does not use `dangerouslySetInnerHTML`. Inputs are normalized and length-limited before submission, and the database enforces length/rating constraints.
 
 ## Review photo compatibility
 
@@ -65,10 +68,12 @@ Staff can:
 - see booking automation state (spreadsheet sync + receipt status)
 - read customer-service conversations
 - reply to guests and close conversations
+- receive new messages and conversation updates live, with automatic polling recovery if Realtime disconnects
 - publish, hide, or delete guest reviews
 - update the homepage daily message
 
 Authorization is enforced by the `admin_users` table plus Supabase RLS.
+Run the current `supabase-schema.sql` in the Supabase SQL Editor to add the support tables to the `supabase_realtime` publication. The staff inbox uses the authenticated admin session; the public guest widget continues to use visitor-token-checked RPCs and refreshes messages every few seconds.
 
 ## Google Sheets + Gmail automation
 
@@ -92,6 +97,8 @@ When a booking changes from a non-confirmed state to `confirmed`:
 1. The same function syncs the sheet.
 2. It sends a branded booking confirmation through the Gmail API once Gmail is configured.
 3. `receipt_sent_at` is recorded in Supabase to prevent duplicate automatic receipts.
+
+If delivery fails or a processing claim becomes stale, staff can request a safe retry from the confirmed booking row in `/admin`. The retry leaves the reservation status unchanged and uses the same atomic receipt claim as the first send.
 
 ### Current Supabase key approach
 

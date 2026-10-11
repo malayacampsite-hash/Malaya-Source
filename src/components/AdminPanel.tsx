@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { CalendarDays, Check, ChevronRight, Eye, EyeOff, Inbox, LogOut, MessageSquareText, RefreshCw, Search, Send, Settings2, Star, Trash2, X } from 'lucide-react'
 import { accommodation } from '../data/siteContent'
 import {
@@ -6,16 +6,20 @@ import {
   deleteReview,
   getSiteSetting,
   isSupabaseConfigured,
+  listActiveAccommodations,
   listBookings,
   listConversationMessages,
   listReviewsAdmin,
   listConversations,
+  requestBookingReceiptRetry,
   saveDailyMessage,
   sendStaffMessage,
   setReviewPublished,
   signInAdmin,
   signOutAdmin,
   supabase,
+  subscribeToAdminConversations,
+  subscribeToAdminMessages,
   updateBookingStatus,
   verifyAdmin,
   type AdminConversation,
@@ -23,7 +27,7 @@ import {
   type SupabaseAdminBooking,
 } from '../services/supabase'
 import type { Session } from '@supabase/supabase-js'
-import type { BookingStatus, SiteReview } from '../types'
+import type { Accommodation, BookingStatus, SiteReview } from '../types'
 import { getReviewPhotoDataUrl } from '../services/reviewPhoto'
 import { setNoIndexPageMetadata } from '../services/pageMeta'
 
@@ -33,7 +37,29 @@ function formatDate(value: string) {
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat('en-PH', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
-function stayName(id: string) { return accommodation.find(item => item.id === id)?.name ?? id }
+function mergeConversationMessages(current: AdminMessage[], incoming: AdminMessage[]) {
+  const unique = new Map(current.map(message => [message.id, message]))
+  for (const message of incoming) unique.set(message.id, message)
+  return [...unique.values()].sort((a, b) => {
+    const difference = Date.parse(a.created_at) - Date.parse(b.created_at)
+    return (Number.isFinite(difference) && difference !== 0 ? difference : a.created_at.localeCompare(b.created_at)) || a.id.localeCompare(b.id)
+  })
+}
+function stayName(id: string, stays: Accommodation[] = accommodation) { return stays.find(item => item.id === id)?.name ?? id }
+function receiptAutomation(booking: SupabaseAdminBooking): { label: string; className: string; canRetry: boolean } {
+  if (booking.receipt_sent_at) return { label: 'Receipt sent', className: 'automation-ok', canRetry: false }
+  if (booking.receipt_last_error) return { label: 'Receipt failed', className: 'automation-warn', canRetry: true }
+  if (booking.receipt_processing_at) {
+    const age = Date.now() - new Date(booking.receipt_processing_at).getTime()
+    if (Number.isFinite(age) && age >= 0 && age < 15 * 60 * 1000) return { label: 'Receipt sending', className: 'automation-pending', canRetry: false }
+    return { label: 'Receipt stalled', className: 'automation-warn', canRetry: true }
+  }
+  if (booking.receipt_retry_requested_at) {
+    const age = Date.now() - new Date(booking.receipt_retry_requested_at).getTime()
+    if (Number.isFinite(age) && age >= 0 && age < 2 * 60 * 1000) return { label: 'Retry requested', className: 'automation-pending', canRetry: false }
+  }
+  return { label: 'Receipt queued', className: 'automation-pending', canRetry: true }
+}
 
 export function AdminPanel() {
   useEffect(() => setNoIndexPageMetadata('Staff Dashboard | Malaya Campsite'), [])
@@ -43,10 +69,15 @@ export function AdminPanel() {
   const [authorized, setAuthorized] = useState(false)
   const [tab, setTab] = useState<'bookings' | 'support' | 'reviews' | 'settings'>('bookings')
   const [bookings, setBookings] = useState<SupabaseAdminBooking[]>([])
+  const [stays, setStays] = useState(accommodation)
   const [conversations, setConversations] = useState<AdminConversation[]>([])
   const [reviews, setReviews] = useState<SiteReview[]>([])
   const [selectedConversation, setSelectedConversation] = useState('')
+  const selectedConversationRef = useRef(selectedConversation)
+  selectedConversationRef.current = selectedConversation
   const [messages, setMessages] = useState<AdminMessage[]>([])
+  const [conversationFeedLive, setConversationFeedLive] = useState(false)
+  const [messageFeedLive, setMessageFeedLive] = useState(false)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | BookingStatus>('all')
   const [dailyMessage, setDailyMessage] = useState('')
@@ -81,34 +112,129 @@ export function AdminPanel() {
   }, [session, authorized])
 
   useEffect(() => {
-    if (!session || !authorized || !selectedConversation) return
-    void loadConversationMessages(selectedConversation)
+    if (!session || !authorized) return
+    let active = true
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined
+    let fallbackTimer: ReturnType<typeof setInterval> | undefined
+
+    const refreshConversations = async () => {
+      try {
+        const rows = await listConversations()
+        if (!active) return
+        setConversations(rows)
+        setSelectedConversation(current => current && rows.some(item => item.id === current)
+          ? current
+          : rows[0]?.id ?? '')
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : 'Could not refresh conversations.')
+      }
+    }
+    const startFallback = () => {
+      if (fallbackTimer) return
+      fallbackTimer = setInterval(() => void refreshConversations(), 5000)
+    }
+    const channel = subscribeToAdminConversations(() => {
+      if (!active) return
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(() => void refreshConversations(), 150)
+    }, status => {
+      if (!active) return
+      const connected = status === 'SUBSCRIBED'
+      setConversationFeedLive(connected)
+      if (connected) {
+        if (fallbackTimer) clearInterval(fallbackTimer)
+        fallbackTimer = undefined
+        void refreshConversations()
+      } else {
+        startFallback()
+      }
+    })
+
+    startFallback()
+    void refreshConversations()
+    return () => {
+      active = false
+      setConversationFeedLive(false)
+      if (debounceTimer) clearTimeout(debounceTimer)
+      if (fallbackTimer) clearInterval(fallbackTimer)
+      if (supabase) void supabase.removeChannel(channel)
+    }
+  }, [session, authorized])
+
+  useEffect(() => {
+    if (!session || !authorized || !selectedConversation) {
+      setMessages([])
+      setMessageFeedLive(false)
+      return
+    }
+    let active = true
+    let fallbackTimer: ReturnType<typeof setInterval> | undefined
+
+    const refreshMessages = async () => {
+      try {
+        const rows = await listConversationMessages(selectedConversation)
+        if (active) setMessages(current => mergeConversationMessages(current, rows))
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : 'Could not load conversation.')
+      }
+    }
+    const startFallback = () => {
+      if (fallbackTimer) return
+      fallbackTimer = setInterval(() => void refreshMessages(), 5000)
+    }
+    const channel = subscribeToAdminMessages(selectedConversation, message => {
+      if (active) setMessages(current => mergeConversationMessages(current, [message]))
+    }, status => {
+      if (!active) return
+      const connected = status === 'SUBSCRIBED'
+      setMessageFeedLive(connected)
+      if (connected) {
+        if (fallbackTimer) clearInterval(fallbackTimer)
+        fallbackTimer = undefined
+        void refreshMessages()
+      } else {
+        startFallback()
+      }
+    })
+
+    setMessages([])
+    startFallback()
+    void refreshMessages()
+    return () => {
+      active = false
+      setMessageFeedLive(false)
+      if (fallbackTimer) clearInterval(fallbackTimer)
+      if (supabase) void supabase.removeChannel(channel)
+    }
   }, [selectedConversation, session, authorized])
 
   const filteredBookings = useMemo(() => {
     const q = search.trim().toLowerCase()
     return bookings.filter(item => {
       const matchesStatus = statusFilter === 'all' || item.status === statusFilter
-      const haystack = `${item.full_name} ${item.email} ${item.phone} ${item.booking_reference} ${stayName(item.accommodation_id)}`.toLowerCase()
+      const haystack = `${item.full_name} ${item.email} ${item.phone} ${item.booking_reference} ${stayName(item.accommodation_id, stays)}`.toLowerCase()
       return matchesStatus && (!q || haystack.includes(q))
     })
-  }, [bookings, search, statusFilter])
+  }, [bookings, search, statusFilter, stays])
 
   const activeConversation = conversations.find(item => item.id === selectedConversation) ?? null
+  const supportLive = conversationFeedLive && (!selectedConversation || messageFeedLive)
 
   async function refreshAll() {
     if (!supabase || !authorized) return
     setBusy(true); setError(''); setNotice('')
     try {
-      const [bookingRows, conversationRows, reviewRows, setting] = await Promise.all([
-        listBookings(session ?? undefined),
+      const [bookingRows, conversationRows, reviewRows, setting, stayRows] = await Promise.all([
+        listBookings(),
         listConversations(),
         listReviewsAdmin(),
         getSiteSetting('daily_message'),
+        listActiveAccommodations(),
       ])
       setBookings(bookingRows)
       setConversations(conversationRows)
       setReviews(reviewRows)
+      setStays(stayRows)
       if (setting) setDailyMessage(setting)
       if (!selectedConversation && conversationRows[0]) setSelectedConversation(conversationRows[0].id)
       else if (selectedConversation && !conversationRows.some(item => item.id === selectedConversation)) setSelectedConversation(conversationRows[0]?.id ?? '')
@@ -118,7 +244,10 @@ export function AdminPanel() {
   }
 
   async function loadConversationMessages(id: string) {
-    try { setMessages(await listConversationMessages(id)) }
+    try {
+      const rows = await listConversationMessages(id)
+      if (id === selectedConversationRef.current) setMessages(current => mergeConversationMessages(current, rows))
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not load conversation.') }
   }
 
@@ -141,6 +270,18 @@ export function AdminPanel() {
       setBookings(current => current.map(item => item.id === id ? { ...item, status } : item))
       setNotice('Booking status updated.')
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not update booking.') }
+    finally { setBusy(false) }
+  }
+
+  async function retryBookingReceipt(id: string) {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const requestedAt = await requestBookingReceiptRetry(id)
+      setBookings(current => current.map(item => item.id === id
+        ? { ...item, receipt_retry_requested_at: requestedAt, receipt_processing_at: null, receipt_last_error: null }
+        : item))
+      setNotice('Receipt retry requested. Refresh shortly to check its status.')
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not request a receipt retry.') }
     finally { setBusy(false) }
   }
 
@@ -232,12 +373,12 @@ export function AdminPanel() {
       {tab === 'bookings' ? <section className="admin-section">
         <div className="admin-section-head"><div><span className="eyebrow">RESERVATIONS</span><h2>Booking requests</h2></div><span className="admin-muted">{filteredBookings.length} shown</span></div>
         <div className="booking-tools"><label><Search size={13} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search guest, reference, stay…" /></label><select value={statusFilter} onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}><option value="all">All statuses</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="declined">Declined</option><option value="completed">Completed</option></select></div>
-        <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Guest</th><th>Stay</th><th>Dates</th><th>Contact</th><th>Request</th><th>Automation</th><th>Status</th></tr></thead><tbody>{filteredBookings.map(item => <tr key={item.id}><td><strong>{item.full_name}</strong><span>{item.guests} guest{item.guests === 1 ? '' : 's'}</span></td><td><strong>{stayName(item.accommodation_id)}</strong><span>{item.preferred_arrival ? `Arrival ${item.preferred_arrival}` : 'Arrival time not specified'}</span></td><td><strong>{formatDate(item.check_in)}</strong><span>→ {formatDate(item.check_out)}</span></td><td><span>{item.email}</span><span>{item.phone}</span></td><td><strong>{item.booking_reference}</strong><span>{formatDateTime(item.created_at)}</span>{item.notes ? <span className="cell-note">{item.notes}</span> : null}</td><td><div className="booking-automation"><span className={item.sheet_synced_at ? 'automation-ok' : 'automation-warn'}>{item.sheet_synced_at ? `Sheet row ${item.sheet_row_number ?? '—'}` : item.sheet_sync_error ? 'Sheet sync failed' : 'Sheet pending'}</span>{item.status === 'confirmed' ? <span className={item.receipt_sent_at ? 'automation-ok' : item.receipt_last_error ? 'automation-warn' : 'automation-pending'}>{item.receipt_sent_at ? 'Receipt sent' : item.receipt_last_error ? 'Receipt failed' : item.receipt_processing_at ? 'Receipt sending' : 'Receipt queued'}</span> : null}</div></td><td><select className="status-select" value={item.status} onChange={e => void changeBookingStatus(item.id, e.target.value as BookingStatus)} disabled={busy}><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="declined">Declined</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table>{filteredBookings.length === 0 ? <div className="admin-empty">No booking requests match your current filters.</div> : null}</div>
+        <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Guest</th><th>Stay</th><th>Dates</th><th>Contact</th><th>Request</th><th>Automation</th><th>Status</th></tr></thead><tbody>{filteredBookings.map(item => { const receipt = receiptAutomation(item); return <tr key={item.id}><td><strong>{item.full_name}</strong><span>{item.guests} guest{item.guests === 1 ? '' : 's'}</span></td><td><strong>{stayName(item.accommodation_id, stays)}</strong><span>{item.preferred_arrival ? `Arrival ${item.preferred_arrival}` : 'Arrival time not specified'}</span></td><td><strong>{formatDate(item.check_in)}</strong><span>→ {formatDate(item.check_out)}</span></td><td><span>{item.email}</span><span>{item.phone}</span></td><td><strong>{item.booking_reference}</strong><span>{formatDateTime(item.created_at)}</span>{item.notes ? <span className="cell-note">{item.notes}</span> : null}</td><td><div className="booking-automation"><span className={item.sheet_synced_at ? 'automation-ok' : 'automation-warn'}>{item.sheet_synced_at ? `Sheet row ${item.sheet_row_number ?? '—'}` : item.sheet_sync_error ? 'Sheet sync failed' : 'Sheet pending'}</span>{item.status === 'confirmed' ? <><span className={receipt.className}>{receipt.label}</span>{receipt.canRetry ? <button type="button" className="automation-retry" onClick={() => void retryBookingReceipt(item.id)} disabled={busy}><RefreshCw size={12} /> Retry receipt</button> : null}</> : null}</div></td><td><select className="status-select" value={item.status} onChange={e => void changeBookingStatus(item.id, e.target.value as BookingStatus)} disabled={busy}><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="declined">Declined</option><option value="completed">Completed</option></select></td></tr> })}</tbody></table>{filteredBookings.length === 0 ? <div className="admin-empty">No booking requests match your current filters.</div> : null}</div>
       </section> : null}
 
       {tab === 'support' ? <section className="admin-section">
-        <div className="admin-section-head"><div><span className="eyebrow">GUEST MESSAGES</span><h2>Customer service</h2></div><span className="admin-muted">{openConversations} open</span></div>
-        <div className="support-admin-layout"><aside className="conversation-list">{conversations.map(item => <button key={item.id} className={selectedConversation === item.id ? 'selected' : ''} onClick={() => setSelectedConversation(item.id)}><div><strong>{item.visitor_name || 'Guest visitor'}</strong><small>{item.visitor_email || item.visitor_phone || 'Contact details not added'}</small></div><div className="conversation-meta"><span className={item.status === 'open' ? 'live' : ''}>{item.mode === 'staff' ? 'Staff' : 'Assistant'}</span><time>{formatDateTime(item.updated_at)}</time></div></button>)}{conversations.length === 0 ? <div className="admin-empty">No conversations yet.</div> : null}</aside><div className="conversation-detail">{activeConversation ? <><div className="conversation-head"><div><span className="eyebrow">{activeConversation.mode === 'staff' ? 'STAFF HANDOFF' : 'ASSISTANT FIRST'}</span><h3>{activeConversation.visitor_name || 'Guest visitor'}</h3><p>{activeConversation.visitor_email || 'No email'} · {activeConversation.visitor_phone || 'No phone'}</p></div><div className="conversation-actions"><span className={activeConversation.status === 'open' ? 'status-pill green' : 'status-pill'}>{activeConversation.status}</span>{activeConversation.status === 'open' ? <button className="button button-quiet" onClick={() => void handleCloseConversation()} disabled={busy}>Close</button> : null}</div></div><div className="admin-messages">{messages.map(item => <div key={item.id} className={`admin-message ${item.sender}`}><small>{item.sender === 'visitor' ? 'Guest' : item.sender === 'bot' ? 'Assistant' : item.admin_name || 'Staff'}</small><p>{item.text}</p><time>{formatDateTime(item.created_at)}</time></div>)}</div>{activeConversation.status === 'open' ? <div className="admin-reply"><textarea value={reply} onChange={e => setReply(e.target.value)} placeholder="Reply to the guest…" rows={3} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void sendReply() }} /><button className="button button-primary" disabled={busy || !reply.trim()} onClick={() => void sendReply()}><Send size={14} /> Send</button></div> : null}</> : <div className="admin-empty detail-empty">Select a conversation to review the recorded thread.</div>}</div></div>
+        <div className="admin-section-head"><div><span className="eyebrow">GUEST MESSAGES</span><h2>Customer service</h2></div><div className="support-live-meta"><span className={`support-live-indicator${supportLive ? ' is-live' : ''}`} role="status"><span aria-hidden="true" />{supportLive ? 'Live updates' : 'Reconnecting'}</span><span className="admin-muted">{openConversations} open</span></div></div>
+        <div className="support-admin-layout"><aside className="conversation-list">{conversations.map(item => <button key={item.id} className={selectedConversation === item.id ? 'selected' : ''} onClick={() => setSelectedConversation(item.id)}><div><strong>{item.visitor_name || 'Guest visitor'}</strong><small>{item.visitor_email || item.visitor_phone || 'Contact details not added'}</small></div><div className="conversation-meta"><span className={item.status === 'open' ? 'live' : ''}>{item.mode === 'staff' ? 'Staff' : 'Assistant'}</span><time>{formatDateTime(item.updated_at)}</time></div></button>)}{conversations.length === 0 ? <div className="admin-empty">No conversations yet.</div> : null}</aside><div className="conversation-detail">{activeConversation ? <><div className="conversation-head"><div><span className="eyebrow">{activeConversation.mode === 'staff' ? 'STAFF HANDOFF' : 'ASSISTANT FIRST'}</span><h3>{activeConversation.visitor_name || 'Guest visitor'}</h3><p>{activeConversation.visitor_email || 'No email'} · {activeConversation.visitor_phone || 'No phone'}</p></div><div className="conversation-actions"><span className={activeConversation.status === 'open' ? 'status-pill green' : 'status-pill'}>{activeConversation.status}</span>{activeConversation.status === 'open' ? <button className="button button-quiet" onClick={() => void handleCloseConversation()} disabled={busy}>Close</button> : null}</div></div><div className="admin-messages">{messages.map(item => <div key={item.id} className={`admin-message ${item.sender}`}><small>{item.sender === 'visitor' ? 'Guest' : item.sender === 'bot' ? 'Assistant' : item.admin_name || 'Staff'}</small><p>{item.text}</p><time>{formatDateTime(item.created_at)}</time></div>)}</div>{activeConversation.status === 'open' ? <div className="admin-reply"><textarea value={reply} onChange={e => setReply(e.target.value)} maxLength={2000} placeholder="Reply to the guest…" rows={3} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void sendReply() }} /><button className="button button-primary" disabled={busy || !reply.trim()} onClick={() => void sendReply()}><Send size={14} /> Send</button></div> : null}</> : <div className="admin-empty detail-empty">Select a conversation to review the recorded thread.</div>}</div></div>
       </section> : null}
 
       {tab === 'reviews' ? <section className="admin-section">

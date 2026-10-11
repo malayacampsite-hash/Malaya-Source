@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Camera, Check, ChevronLeft, ImagePlus, Star, X } from 'lucide-react'
 import { createReview } from '../services/supabase'
 import { setNoIndexPageMetadata } from '../services/pageMeta'
@@ -160,6 +160,7 @@ export function ReviewPage() {
   const [photoBusy, setPhotoBusy] = useState(false)
   const [error, setError] = useState('')
   const [sent, setSent] = useState(false)
+  const submittingRef = useRef(false)
 
   useEffect(() => setNoIndexPageMetadata('Leave a Review | Malaya Campsite'), [])
 
@@ -201,6 +202,7 @@ export function ReviewPage() {
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError('')
+    if (submittingRef.current || busy || photoBusy) return
     if (honeypot.trim()) return
 
     const name = cleanText(fullName, 120)
@@ -210,6 +212,7 @@ export function ReviewPage() {
     if (!rating) return setError('Please choose a star rating.')
     if (!text) return setError('Please write your review.')
 
+    submittingRef.current = true
     setBusy(true)
     try {
       await createReview({
@@ -222,6 +225,7 @@ export function ReviewPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'We could not submit your review.')
     } finally {
+      submittingRef.current = false
       setBusy(false)
     }
   }
@@ -235,7 +239,7 @@ export function ReviewPage() {
             <div className="success-mark"><Check size={22} /></div>
             <p className="eyebrow">THANK YOU</p>
             <h1>Your story is now part of Malaya.</h1>
-            <p>Your review has been added to the guest stories on the website.</p>
+            <p>Your review has been sent to Malaya for approval. It will appear in the guest stories once published.</p>
             <a className="button button-primary" href="/#reviews">See the reviews</a>
           </div>
         </div>
@@ -303,7 +307,7 @@ export function ReviewPage() {
                   <small>Your photo is automatically resized and compressed before it is saved.</small>
                 </span>
               )}
-              <input id="review-photo" type="file" accept="image/*" onChange={handlePhoto} disabled={photoBusy || busy} />
+              <input id="review-photo" type="file" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.avif,image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif" onChange={handlePhoto} disabled={photoBusy || busy} />
             </label>
 
             {photoName ? (
@@ -321,7 +325,7 @@ export function ReviewPage() {
           <button className="button button-primary review-submit" type="submit" disabled={busy || photoBusy}>
             {busy ? 'Sending…' : 'Submit review'}
           </button>
-          <p className="review-privacy">Reviews are displayed as plain text. Uploaded photos are resized and compressed before secure storage; no account is required.</p>
+          <p className="review-privacy">Reviews are checked by the Malaya team before display. Uploaded photos are resized and compressed before secure storage; no account is required.</p>
         </form>
       </div>
     </main>
