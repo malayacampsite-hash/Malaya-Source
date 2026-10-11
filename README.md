@@ -74,6 +74,7 @@ Staff can:
 
 Authorization is enforced by the `admin_users` table plus Supabase RLS.
 Run the current `supabase-schema.sql` in the Supabase SQL Editor to add the support tables to the `supabase_realtime` publication. The staff inbox uses the authenticated admin session; the public guest widget continues to use visitor-token-checked RPCs and refreshes messages every few seconds.
+The guest support flow requires a name, valid email, and phone number before starting; the database RPCs enforce the same contact requirement. A staff request keeps the assistant available while the guest waits, and an actual staff reply disables assistant responses for that conversation. Re-run the schema after this change so the updated RPC behavior is installed.
 
 ## Google Sheets + Gmail automation
 

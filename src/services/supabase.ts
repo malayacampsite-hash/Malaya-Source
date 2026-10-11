@@ -190,7 +190,11 @@ export async function sendStaffMessage(conversationId: string, text: string, adm
   const client = requireSupabase()
   const message = normalizeSupportText(text, 2000)
   if (!message) throw new Error('Please write a message before sending.')
-  const { error } = await client.from('support_messages').insert({ conversation_id: conversationId, sender: 'staff', text: message, admin_name: adminName ? normalizeSupportText(adminName, 120) : null })
+  const { error } = await client.rpc('send_support_staff_message', {
+    p_conversation_id: conversationId,
+    p_text: message,
+    p_admin_name: adminName ? normalizeSupportText(adminName, 120) : null,
+  })
   if (error) throw error
 }
 
@@ -232,9 +236,12 @@ export async function updateSupportVisitor(conversationId: string, visitorToken:
   const name = normalizeSupportText(contact.name, 120)
   const email = normalizeSupportText(contact.email, 254).toLowerCase()
   const phone = normalizeSupportText(contact.phone, 40)
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Please enter a valid email address.')
+  if (!name) throw new Error('Please enter your name.')
+  if (!email) throw new Error('Please enter your email address.')
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Please enter a valid email address.')
+  if (!phone) throw new Error('Please enter your phone number.')
   const phoneDigits = phone.replace(/\D/g, '')
-  if (phone && (!/^\+?[\d\s().-]+$/.test(phone) || phoneDigits.length < 7 || phoneDigits.length > 15)) {
+  if (!/^\+?[\d\s().-]+$/.test(phone) || phoneDigits.length < 7 || phoneDigits.length > 15) {
     throw new Error('Please enter a valid phone number.')
   }
   const { error } = await client.rpc('update_support_visitor', { p_conversation_id: conversationId, p_visitor_token: visitorToken, p_visitor_name: name || null, p_visitor_email: email || null, p_visitor_phone: phone || null })

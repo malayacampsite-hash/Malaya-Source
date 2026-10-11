@@ -103,14 +103,22 @@ create index if not exists bookings_check_in_idx on public.bookings(check_in);
 -- Pending requests may overlap because they still require staff confirmation.
 do $$
 begin
-  alter table public.bookings
-    add constraint bookings_confirmed_no_overlap
-    exclude using gist (
-      accommodation_id with =,
-      daterange(check_in, check_out, '[)') with &&
-    ) where (status = 'confirmed');
+  if not exists (
+    select 1
+    from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_confirmed_no_overlap'
+  ) then
+    alter table public.bookings
+      add constraint bookings_confirmed_no_overlap
+      exclude using gist (
+        accommodation_id with =,
+        daterange(check_in, check_out, '[)') with &&
+      ) where (status = 'confirmed');
+  end if;
 exception
-  when duplicate_object then null;
+  -- Older runs may have created the backing index before the schema completed.
+  when duplicate_object or duplicate_table then null;
 end $$;
 
 create table if not exists public.support_conversations (
@@ -199,7 +207,10 @@ returns trigger
 language plpgsql
 as $$
 begin
-  update public.support_conversations set updated_at = now() where id = new.conversation_id;
+  update public.support_conversations
+  set updated_at = now(),
+      mode = case when new.sender = 'staff' then 'staff' else mode end
+  where id = new.conversation_id;
   return new;
 end;
 $$;
@@ -294,10 +305,23 @@ security definer
 set search_path = public
 as $$
 begin
+  if char_length(trim(coalesce(p_visitor_name, ''))) not between 1 and 120 then
+    raise exception 'Please enter your name';
+  end if;
+  if char_length(trim(coalesce(p_visitor_email, ''))) not between 3 and 254
+    or lower(trim(coalesce(p_visitor_email, ''))) !~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$' then
+    raise exception 'Please enter a valid email address';
+  end if;
+  if char_length(trim(coalesce(p_visitor_phone, ''))) not between 7 and 40
+    or trim(coalesce(p_visitor_phone, '')) !~ '^[+]?[0-9 ().-]+$'
+    or char_length(regexp_replace(coalesce(p_visitor_phone, ''), '[^0-9]', '', 'g')) not between 7 and 15 then
+    raise exception 'Please enter a valid phone number';
+  end if;
+
   update public.support_conversations
   set visitor_name = nullif(trim(p_visitor_name), ''),
-      visitor_email = nullif(trim(p_visitor_email), ''),
-      visitor_phone = nullif(trim(p_visitor_phone), '')
+      visitor_email = lower(trim(p_visitor_email)),
+      visitor_phone = trim(p_visitor_phone)
   where id = p_conversation_id and visitor_token = p_visitor_token and status = 'open';
   if not found then raise exception 'Conversation not found'; end if;
 end;
@@ -314,14 +338,31 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare new_id uuid;
+declare
+  new_id uuid;
+  conversation_row public.support_conversations%rowtype;
 begin
   if p_sender not in ('visitor', 'bot') then raise exception 'Invalid visitor sender'; end if;
   if length(trim(p_text)) < 1 or length(trim(p_text)) > 2000 then raise exception 'Invalid message length'; end if;
-  if not exists (
-    select 1 from public.support_conversations
-    where id = p_conversation_id and visitor_token = p_visitor_token and status = 'open'
-  ) then raise exception 'Conversation not found'; end if;
+  select * into conversation_row
+  from public.support_conversations
+  where id = p_conversation_id and visitor_token = p_visitor_token and status = 'open'
+  for update;
+  if not found then raise exception 'Conversation not found'; end if;
+  if char_length(trim(coalesce(conversation_row.visitor_name, ''))) not between 1 and 120
+    or char_length(trim(coalesce(conversation_row.visitor_email, ''))) not between 3 and 254
+    or lower(trim(coalesce(conversation_row.visitor_email, ''))) !~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'
+    or char_length(trim(coalesce(conversation_row.visitor_phone, ''))) not between 7 and 40
+    or trim(coalesce(conversation_row.visitor_phone, '')) !~ '^[+]?[0-9 ().-]+$'
+    or char_length(regexp_replace(coalesce(conversation_row.visitor_phone, ''), '[^0-9]', '', 'g')) not between 7 and 15 then
+    raise exception 'Add a valid name, email, and phone number before chatting';
+  end if;
+  if p_sender = 'bot' and exists (
+    select 1 from public.support_messages
+    where conversation_id = p_conversation_id and sender = 'staff'
+  ) then
+    return null;
+  end if;
   insert into public.support_messages(conversation_id, sender, text)
   values (p_conversation_id, p_sender, trim(p_text))
   returning id into new_id;
@@ -341,10 +382,57 @@ set search_path = public
 as $$
 begin
   if p_mode not in ('bot', 'staff') then raise exception 'Invalid support mode'; end if;
+  if not exists (
+    select 1 from public.support_conversations
+    where id = p_conversation_id
+      and visitor_token = p_visitor_token
+      and status = 'open'
+      and char_length(trim(coalesce(visitor_name, ''))) between 1 and 120
+      and char_length(trim(coalesce(visitor_email, ''))) between 3 and 254
+      and lower(trim(coalesce(visitor_email, ''))) ~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'
+      and char_length(trim(coalesce(visitor_phone, ''))) between 7 and 40
+      and trim(coalesce(visitor_phone, '')) ~ '^[+]?[0-9 ().-]+$'
+      and char_length(regexp_replace(coalesce(visitor_phone, ''), '[^0-9]', '', 'g')) between 7 and 15
+  ) then
+    raise exception 'Add a valid name, email, and phone number before requesting staff';
+  end if;
   update public.support_conversations
   set mode = p_mode
   where id = p_conversation_id and visitor_token = p_visitor_token and status = 'open';
   if not found then raise exception 'Conversation not found'; end if;
+end;
+$$;
+
+create or replace function public.send_support_staff_message(
+  p_conversation_id uuid,
+  p_text text,
+  p_admin_name text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_id uuid;
+begin
+  if not public.is_malaya_admin() then raise exception 'Not authorized'; end if;
+  if char_length(trim(coalesce(p_text, ''))) not between 1 and 2000 then
+    raise exception 'Invalid message length';
+  end if;
+  if char_length(trim(coalesce(p_admin_name, ''))) > 120 then
+    raise exception 'Invalid staff name';
+  end if;
+
+  perform 1 from public.support_conversations
+  where id = p_conversation_id and status = 'open'
+  for update;
+  if not found then raise exception 'Conversation not found'; end if;
+
+  insert into public.support_messages(conversation_id, sender, text, admin_name)
+  values (p_conversation_id, 'staff', trim(p_text), nullif(trim(p_admin_name), ''))
+  returning id into new_id;
+  return new_id;
 end;
 $$;
 
@@ -377,12 +465,14 @@ revoke all on function public.get_support_state(uuid, text) from public;
 revoke all on function public.update_support_visitor(uuid, text, text, text, text) from public;
 revoke all on function public.add_support_message(uuid, text, text, text) from public;
 revoke all on function public.set_support_mode(uuid, text, text) from public;
+revoke all on function public.send_support_staff_message(uuid, text, text) from public;
 revoke all on function public.get_support_messages(uuid, text) from public;
 grant execute on function public.create_support_conversation(text) to anon, authenticated;
 grant execute on function public.get_support_state(uuid, text) to anon, authenticated;
 grant execute on function public.update_support_visitor(uuid, text, text, text, text) to anon, authenticated;
 grant execute on function public.add_support_message(uuid, text, text, text) to anon, authenticated;
 grant execute on function public.set_support_mode(uuid, text, text) to anon, authenticated;
+grant execute on function public.send_support_staff_message(uuid, text, text) to authenticated;
 grant execute on function public.get_support_messages(uuid, text) to anon, authenticated;
 
 grant execute on function public.get_support_state(uuid, text) to anon, authenticated;
