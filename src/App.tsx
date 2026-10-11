@@ -30,6 +30,9 @@ const guideItems = [
   ['Payments & changes', 'Your online request does not take payment. The Malaya team confirms the reservation and can guide you through any changes.'],
 ]
 
+const campsiteLocation = '3RQ4+W26 Sitio Pulo, Nasugbu, Batangas'
+const encodedCampsiteLocation = encodeURIComponent(campsiteLocation)
+
 export default function App() {
   const [bookingOpen, setBookingOpen] = useState(false)
   const [presetStay, setPresetStay] = useState<string | undefined>(undefined)
@@ -77,7 +80,7 @@ export default function App() {
           <div className="hero-overlay" />
           <div className="hero-content shell-wide">
             <div className="hero-kicker"><span /> NASUGBU, BATANGAS</div>
-            <h1>You don’t have to keep up<br />with the world today.</h1>
+            <h1>You don’t have to keep up<br className="hero-desktop-break" />with the world today.</h1>
             <p>Traditional province-style camping. A slow living escape.</p>
             <div className="hero-actions">
               <button className="button button-light" onClick={() => scrollTo('malaya-story')}><span className="play-dot">▶</span> Silipin ang Malaya</button>
@@ -176,7 +179,23 @@ export default function App() {
             <p className="eyebrow">07 / BAGO BUMIYAHE.</p><h2>Bago bumiyahe.</h2>
             <div className="accordion-list">{guideItems.map(([title, answer]) => <div key={title} className="accordion-row"><button onClick={() => setOpenGuide(openGuide === title ? null : title)}><span>{title}</span><Plus size={15} className={openGuide === title ? 'rotate' : ''} /></button>{openGuide === title ? <p>{answer}</p> : null}</div>)}</div>
           </div>
-          <div className="location-column"><p className="eyebrow">LOCATION</p><h3>Pulo, Brgy. Kaylaway,<br />Nasugbu, Batangas</h3><div className="map-placeholder"><MapPin size={22} /><span>Location map</span></div><div className="map-actions"><a href="https://www.google.com/maps/search/?api=1&query=Pulo%2C%20Brgy.%20Kaylaway%2C%20Nasugbu%2C%20Batangas" target="_blank" rel="noreferrer">Google Maps</a><a href="https://www.waze.com/ul?q=Pulo%2C%20Brgy.%20Kaylaway%2C%20Nasugbu%2C%20Batangas&navigate=yes" target="_blank" rel="noreferrer">Waze</a></div></div>
+          <div className="location-column">
+            <p className="eyebrow">LOCATION</p>
+            <h3>3RQ4+W26 Sitio Pulo,<br />Nasugbu, Batangas</h3>
+            <div className="map-placeholder">
+              <iframe
+                title="Malaya Campsite location map"
+                src={`https://maps.google.com/maps?q=${encodedCampsiteLocation}&output=embed`}
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+                allowFullScreen
+              />
+            </div>
+            <div className="map-actions">
+              <a href={`https://www.google.com/maps/search/?api=1&query=${encodedCampsiteLocation}`} target="_blank" rel="noreferrer">Google Maps</a>
+              <a href={`https://www.waze.com/ul?q=${encodedCampsiteLocation}&navigate=yes`} target="_blank" rel="noreferrer">Waze</a>
+            </div>
+          </div>
         </section>
 
         <section id="faqs" className="faq-block shell">
@@ -187,7 +206,7 @@ export default function App() {
         <section className="final-cta shell-wide"><div><p className="eyebrow eyebrow-light">09 / COME AS YOU ARE</p><h2>You don’t have to<br />earn your rest.</h2><p>Dito, pwedeng-pwede magpahinga.</p><button className="button button-light" onClick={() => openBooking()}>Check available dates <ArrowRight size={15} /></button></div><div className="final-cta-image"><SafeImage src="/images/waterfall.webp" alt="Nature near Malaya Campsite" /></div></section>
 
         <section id="contact" className="contact-strip shell">
-          <div className="contact-item"><MapPin size={17} /><div><span className="eyebrow">LOCATION</span><strong>Pulo, Brgy. Kaylaway, Nasugbu, Batangas</strong></div></div>
+          <div className="contact-item"><MapPin size={17} /><div><span className="eyebrow">LOCATION</span><strong>{campsiteLocation}</strong></div></div>
           <button className="contact-item contact-button" onClick={() => setSupportOpen(true)}><MessageCircle size={17} /><div><span className="eyebrow">MESSAGE US</span><strong>Guest support</strong></div></button>
           <a className="contact-item" href="mailto:malayacampsite@gmail.com"><ExternalLink size={17} /><div><span className="eyebrow">EMAIL</span><strong>malayacampsite@gmail.com</strong></div></a>
         </section>
