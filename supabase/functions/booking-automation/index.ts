@@ -200,10 +200,23 @@ function formatDateTime(date: string) {
   return new Intl.DateTimeFormat('en-PH', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date))
 }
 
+function emailDetailRow(label: string, value: string) {
+  return `<tr><td style="padding:15px 0;color:#758079;font-size:13px;line-height:1.5;width:34%;vertical-align:top">${label}</td><td style="padding:15px 0;color:#203127;font-size:14px;line-height:1.5;font-weight:700;text-align:right;vertical-align:top">${value}</td></tr>`
+}
+
 function htmlReceipt(booking: BookingRecord) {
-  const note = booking.notes ? `<div style="margin-top:22px;padding:16px 18px;background:#f3f5ef;border-left:3px solid #1f4c37"><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#65756a;font-weight:700;margin-bottom:7px">Guest notes</div><div style="font-size:14px;line-height:1.7;color:#28352e">${escapeHtml(booking.notes)}</div></div>` : ''
-  const logo = LOGO_URL ? `<img src="cid:malaya-logo" alt="Malaya Campsite" style="display:block;height:48px;width:auto;max-width:220px" />` : '<div style="font-size:24px;font-weight:800;letter-spacing:.08em;color:#1a6b2a">MALAYA</div><div style="font-size:8px;letter-spacing:.35em;color:#617064;margin-top:2px">CAMPSITE</div>'
-  return `<!doctype html><html><body style="margin:0;background:#eef0e9;font-family:Arial,Helvetica,sans-serif;color:#203127"><div style="padding:30px 12px"><div style="max-width:620px;margin:0 auto;background:#fffef8;border:1px solid #d8ded5"><div style="padding:26px 28px;border-bottom:1px solid #d8ded5;background:#f7f8f2">${logo}<div style="margin-top:24px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#6c766f;font-weight:700">Booking confirmation</div><div style="margin-top:7px;font-size:30px;line-height:1.08;font-family:Georgia,serif;color:#173b2b">Your stay is confirmed.</div><div style="margin-top:10px;font-size:14px;line-height:1.7;color:#65736a">Thank you for choosing Malaya Campsite. We look forward to welcoming you to Nasugbu, Batangas.</div></div><div style="padding:28px"><div style="display:flex;justify-content:space-between;gap:20px;align-items:flex-start"><div><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Reference</div><div style="font-size:18px;font-weight:700;color:#183b2b;margin-top:5px">${escapeHtml(booking.booking_reference)}</div></div><div style="text-align:right"><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Status</div><div style="font-size:18px;font-weight:700;color:#2e6a48;margin-top:5px">Confirmed</div></div></div><div style="margin-top:26px;border-top:1px solid #d8ded5;border-bottom:1px solid #d8ded5"><div style="padding:15px 0;display:flex;justify-content:space-between;gap:20px"><span style="color:#758079;font-size:13px">Accommodation</span><strong style="font-size:14px">${escapeHtml(stayName(booking.accommodation_id))}</strong></div><div style="padding:15px 0;display:flex;justify-content:space-between;gap:20px;border-top:1px solid #e5e9e1"><span style="color:#758079;font-size:13px">Check-in</span><strong style="font-size:14px">${escapeHtml(formatDate(booking.check_in))}</strong></div><div style="padding:15px 0;display:flex;justify-content:space-between;gap:20px;border-top:1px solid #e5e9e1"><span style="color:#758079;font-size:13px">Check-out</span><strong style="font-size:14px">${escapeHtml(formatDate(booking.check_out))}</strong></div><div style="padding:15px 0;display:flex;justify-content:space-between;gap:20px;border-top:1px solid #e5e9e1"><span style="color:#758079;font-size:13px">Guests</span><strong style="font-size:14px">${escapeHtml(booking.guests)} guest${booking.guests === 1 ? '' : 's'}</strong></div>${booking.preferred_arrival ? `<div style="padding:15px 0;display:flex;justify-content:space-between;gap:20px;border-top:1px solid #e5e9e1"><span style="color:#758079;font-size:13px">Preferred arrival</span><strong style="font-size:14px">${escapeHtml(booking.preferred_arrival)}</strong></div>` : ''}</div>${note}<div style="margin-top:24px;padding:17px 18px;background:#173d2c;color:#fff"><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#cfe0d3;font-weight:700">At a glance</div><div style="margin-top:7px;font-size:14px;line-height:1.7">22-hour stay · Nasugbu, Batangas</div></div></div><div style="padding:20px 28px;border-top:1px solid #d8ded5;background:#f7f8f2;color:#6b776f;font-size:12px;line-height:1.7"><strong style="color:#1f392b">Malaya Campsite</strong><br/>Pulo, Brgy. Kaylaway, Nasugbu, Batangas<br/><a href="mailto:${GMAIL_SENDER}" style="color:#1f5b40;text-decoration:none">${GMAIL_SENDER}</a><br/><span>Keep this email for your booking details.</span><div style="margin-top:12px;font-size:10px;color:#87928a">${escapeHtml(formatDateTime(booking.created_at))}</div></div></div></div></body></html>`
+  const note = booking.notes
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:22px"><tr><td style="padding:16px 18px;background:#f3f5ef;border-left:3px solid #1f4c37"><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#65756a;font-weight:700;margin-bottom:7px">Guest notes</div><div style="font-size:14px;line-height:1.7;color:#28352e">${escapeHtml(booking.notes)}</div></td></tr></table>`
+    : ''
+  const logo = LOGO_URL
+    ? `<img src="cid:malaya-logo" alt="Malaya Campsite" style="display:block;height:48px;width:auto;max-width:220px" />`
+    : '<div style="font-size:24px;font-weight:800;letter-spacing:.08em;color:#1a6b2a">MALAYA</div><div style="font-size:8px;letter-spacing:.35em;color:#617064;margin-top:2px">CAMPSITE</div>'
+
+  const headerMeta = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td width="50%" style="padding:0 12px 0 0;vertical-align:top"><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Reference</div><div style="font-size:17px;line-height:1.35;font-weight:700;color:#183b2b;margin-top:5px;word-break:break-word">${escapeHtml(booking.booking_reference)}</div></td><td width="50%" style="padding:0 0 0 12px;vertical-align:top;text-align:right"><div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#708078;font-weight:700">Status</div><div style="font-size:17px;line-height:1.35;font-weight:700;color:#2e6a48;margin-top:5px">Confirmed</div></td></tr></table>`
+
+  const details = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #d8ded5;border-bottom:1px solid #d8ded5;margin-top:26px">${emailDetailRow('Accommodation', escapeHtml(stayName(booking.accommodation_id)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-in', escapeHtml(formatDate(booking.check_in)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Check-out', escapeHtml(formatDate(booking.check_out)))}<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Guests', escapeHtml(`${booking.guests} guest${booking.guests === 1 ? '' : 's'}`))}${booking.preferred_arrival ? `<tr><td colspan="2" style="height:1px;background:#e5e9e1;font-size:0;line-height:0"></td></tr>${emailDetailRow('Preferred arrival', escapeHtml(booking.preferred_arrival))}` : ''}</table>`
+
+  return `<!doctype html><html><body style="margin:0;background:#eef0e9;font-family:Arial,Helvetica,sans-serif;color:#203127"><div style="padding:30px 12px"><div style="max-width:620px;margin:0 auto;background:#fffef8;border:1px solid #d8ded5"><div style="padding:26px 28px;border-bottom:1px solid #d8ded5;background:#f7f8f2">${logo}<div style="margin-top:24px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#6c766f;font-weight:700">Booking confirmation</div><div style="margin-top:7px;font-size:30px;line-height:1.08;font-family:Georgia,serif;color:#173b2b">Your stay is confirmed.</div><div style="margin-top:10px;font-size:14px;line-height:1.7;color:#65736a">Thank you for choosing Malaya Campsite. We look forward to welcoming you to Nasugbu, Batangas.</div></div><div style="padding:28px">${headerMeta}${details}${note}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px"><tr><td style="padding:17px 18px;background:#173d2c;color:#fff"><div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#cfe0d3;font-weight:700">At a glance</div><div style="margin-top:7px;font-size:14px;line-height:1.7">22-hour stay · Nasugbu, Batangas</div></td></tr></table></div><div style="padding:20px 28px;border-top:1px solid #d8ded5;background:#f7f8f2;color:#6b776f;font-size:12px;line-height:1.7"><strong style="color:#1f392b">Malaya Campsite</strong><br/>Pulo, Brgy. Kaylaway, Nasugbu, Batangas<br/><a href="mailto:${GMAIL_SENDER}" style="color:#1f5b40;text-decoration:none">${GMAIL_SENDER}</a><br/><span>Keep this email for your booking details.</span><div style="margin-top:12px;font-size:10px;color:#87928a">${escapeHtml(formatDateTime(booking.created_at))}</div></div></div></div></body></html>`
 }
 
 function randomBoundary() {
@@ -337,9 +350,27 @@ async function processBooking(
     if (claimed) {
       try {
         const messageId = await sendBookingReceipt(booking)
+        const receiptSentAt = new Date().toISOString()
         result.receipt = 'sent'
         result.gmail_message_id = messageId
-        await writeAutomationMetadata(supabaseAdmin, booking.id, { receipt_sent_at: new Date().toISOString(), receipt_processing_at: null, receipt_last_error: null })
+        await writeAutomationMetadata(supabaseAdmin, booking.id, { receipt_sent_at: receiptSentAt, receipt_processing_at: null, receipt_last_error: null })
+
+        // Keep the Google Sheet's Receipt Sent At column in sync with the successful send.
+        // This is written directly because the metadata-only DB update is intentionally
+        // ignored by bookingMeaningfullyChanged to avoid webhook loops.
+        try {
+          const syncedBooking: BookingRecord = { ...booking, receipt_sent_at: receiptSentAt }
+          const rowNumber = Number(booking.sheet_row_number ?? result.sheet_row_number ?? 0)
+          if (rowNumber > 1) {
+            await updateBookingSheetRow(await googleAccessToken(), syncedBooking, rowNumber)
+          } else {
+            await syncBookingToSheet(syncedBooking)
+          }
+        } catch (sheetReceiptError) {
+          const message = sheetReceiptError instanceof Error ? sheetReceiptError.message : 'Unknown spreadsheet receipt timestamp error.'
+          result.spreadsheet_receipt_update = 'failed'
+          result.spreadsheet_receipt_update_error = message
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown Gmail error.'
         result.receipt = 'failed'

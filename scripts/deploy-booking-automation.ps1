@@ -57,11 +57,21 @@ if ([string]::IsNullOrWhiteSpace($env:SUPABASE_ACCESS_TOKEN)) {
     throw "SUPABASE_ACCESS_TOKEN is missing from .env.supabase"
 }
 
+if (!(Test-Path -LiteralPath $FunctionEnvFile)) {
+    throw "Edge Function environment file not found: $FunctionEnvFile"
+}
+
 Write-Host "Setting production Edge Function secrets..."
 npx supabase secrets set --env-file $FunctionEnvFile --project-ref $env:SUPABASE_PROJECT_REF
+if ($LASTEXITCODE -ne 0) {
+    throw "Supabase secrets upload failed (exit code $LASTEXITCODE). Deployment was stopped."
+}
 
 Write-Host "Deploying booking-automation..."
 npx supabase functions deploy booking-automation --project-ref $env:SUPABASE_PROJECT_REF --use-api
+if ($LASTEXITCODE -ne 0) {
+    throw "booking-automation deployment failed (exit code $LASTEXITCODE)."
+}
 
 Write-Host ""
 Write-Host "Deployment complete."

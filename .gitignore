@@ -8,3 +8,6 @@ dist
 .env.*.local
 .env.supabase
 supabase/functions/.env
+# Never commit Google OAuth credentials
+client_secret_*.json
+credentials.json

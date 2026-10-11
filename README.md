@@ -50,6 +50,10 @@ Run the complete `supabase-schema.sql` in the Supabase SQL Editor. It includes:
 
 Public review submissions require only a full name, 1-5 star rating, and review text. No Supabase account is required. The frontend renders review text as React text nodes only; it does not use `dangerouslySetInnerHTML`. Inputs are normalized and length-limited before submission, and the database enforces length/rating constraints.
 
+## Review photo compatibility
+
+The account-free review form accepts supported raster image formats up to 8 MB, resizes them in the browser, prefers WebP where encoding is supported, and automatically falls back to JPEG when Safari cannot encode WebP. The database continues to store a base64 payload in the existing `photo_data` column, so no schema migration is required. The site detects the saved image format from the payload signature, preserving compatibility with older WebP reviews and new JPEG fallbacks in both public review cards and the admin review tab.
+
 ## Admin panel
 
 Open `/admin`.
@@ -120,8 +124,8 @@ GOOGLE_REFRESH_TOKEN=...
 GOOGLE_SHEET_ID=...
 GOOGLE_SHEET_RANGE=Bookings!A:O
 GMAIL_SENDER_EMAIL=malayacampsite@gmail.com
-MALAYA_PUBLIC_SITE_URL=https://malayacampsite.com
-MALAYA_LOGO_URL=https://malayacampsite.com/images/logo.png
+MALAYA_PUBLIC_SITE_URL=https://www.malayacampsite.com
+MALAYA_LOGO_URL=https://www.malayacampsite.com/images/logo.png
 ```
 
 Hosted Supabase automatically provides `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEYS`, and `SUPABASE_SECRET_KEYS` to Edge Functions. The function uses `@supabase/server` with `withSupabase({ auth: 'secret' })`, which validates the secret API key and provides `ctx.supabaseAdmin` for trusted database updates.
@@ -172,6 +176,12 @@ npx supabase secrets set --env-file .\supabase\functions\.env --project-ref YOUR
 npx supabase functions deploy booking-automation --project-ref YOUR_PROJECT_REF --use-api
 ```
 
+### Booking receipt email update
+
+The confirmation email uses table-based email markup for reliable rendering across common email clients. The reference and status blocks no longer rely on CSS flexbox, so they do not run together in clients that strip or partially support modern CSS.
+
+After a Gmail receipt is successfully sent, the function also writes the `receipt_sent_at` timestamp back to the corresponding Google Sheets row without triggering another automation loop.
+
 ### Security
 
 Never put any of these in the Vite frontend or commit them:
@@ -184,3 +194,20 @@ Never put any of these in the Vite frontend or commit them:
 The only Supabase credential intended for browser use is the publishable key, with access controlled by RLS.
 
 Gmail automation can remain unconfigured while we finish the Supabase + Google Sheets setup.
+
+
+## Technical SEO
+
+The public homepage has a descriptive title and meta description, canonical URL, Open Graph/Twitter sharing metadata, a JPEG social-preview image, and `LodgingBusiness` JSON-LD with the location and contact details already used by the website. `public/robots.txt` references `public/sitemap.xml`; the sitemap intentionally lists only the canonical homepage because the rest of the public experience is a single page with in-page sections. Admin is excluded from crawling, and the `/admin`, `/review`, and `/404` routes set `noindex` metadata at runtime.
+
+Canonical host: `https://www.malayacampsite.com/` (the apex domain redirects to `www`). Keep this host consistent in future canonical URLs and public links.
+
+### After deploying to Vercel
+
+1. Open `https://www.malayacampsite.com/robots.txt` and confirm it loads.
+2. Open `https://www.malayacampsite.com/sitemap.xml` and confirm the XML loads.
+3. Verify the `www.malayacampsite.com` domain in Google Search Console, then submit `sitemap.xml` under **Indexing → Sitemaps**.
+4. In Search Console, inspect the homepage URL and request indexing after deployment.
+5. Keep the campsite name, address, email, photos, and booking details consistent with the official Google Business Profile and other local listings. Technical metadata helps search engines understand the site but does not guarantee a particular ranking.
+
+The `og-malaya.jpg` file is a 1200 × 630 social preview cropped from the supplied campsite photo. Update it if the primary hero photo changes.

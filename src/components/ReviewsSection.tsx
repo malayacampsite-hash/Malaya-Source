@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowRight, Star } from 'lucide-react'
 import type { SiteReview } from '../types'
 import { listPublishedReviews } from '../services/supabase'
+import { getReviewPhotoDataUrl } from '../services/reviewPhoto'
 
 export function ReviewsSection() {
   const [reviews, setReviews] = useState<SiteReview[]>([])
@@ -34,7 +35,7 @@ export function ReviewsSection() {
                 <div className="review-photo-wrap">
                   <img
                     className="review-photo"
-                    src={`data:image/webp;base64,${review.photo_data}`}
+                    src={getReviewPhotoDataUrl(review.photo_data)}
                     alt={`Guest photo shared by ${review.full_name}`}
                     loading="lazy"
                     decoding="async"

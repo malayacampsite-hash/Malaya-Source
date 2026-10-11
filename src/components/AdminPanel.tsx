@@ -24,6 +24,8 @@ import {
 } from '../services/supabase'
 import type { Session } from '@supabase/supabase-js'
 import type { BookingStatus, SiteReview } from '../types'
+import { getReviewPhotoDataUrl } from '../services/reviewPhoto'
+import { setNoIndexPageMetadata } from '../services/pageMeta'
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('en-PH', { dateStyle: 'medium' }).format(new Date(`${value}T00:00:00`))
@@ -34,6 +36,8 @@ function formatDateTime(value: string) {
 function stayName(id: string) { return accommodation.find(item => item.id === id)?.name ?? id }
 
 export function AdminPanel() {
+  useEffect(() => setNoIndexPageMetadata('Staff Dashboard | Malaya Campsite'), [])
+
   const [session, setSession] = useState<Session | null>(null)
   const [booting, setBooting] = useState(true)
   const [authorized, setAuthorized] = useState(false)
@@ -238,7 +242,7 @@ export function AdminPanel() {
 
       {tab === 'reviews' ? <section className="admin-section">
         <div className="admin-section-head"><div><span className="eyebrow">GUEST FEEDBACK</span><h2>Reviews</h2></div><span className="admin-muted">{reviews.length} total</span></div>
-        <div className="review-admin-list">{reviews.map(review => <article className="review-admin-row" key={review.id}>{review.photo_data ? <img className="review-admin-photo" src={`data:image/webp;base64,${review.photo_data}`} alt={`Guest photo from ${review.full_name}`} loading="lazy" decoding="async" /> : null}<div className="review-admin-main"><div className="review-admin-stars" aria-label={`${review.rating} out of 5 stars`}>{[1,2,3,4,5].map(value => <Star key={value} size={13} fill={value <= review.rating ? 'currentColor' : 'none'} />)}</div><strong>{review.full_name}</strong><p>{review.review_text}</p><small>{formatDateTime(review.created_at)}{review.photo_data ? ' · Photo attached' : ''}</small></div><div className="review-admin-actions"><span className={review.published ? 'status-pill green' : 'status-pill'}>{review.published ? 'Published' : 'Hidden'}</span><button className="admin-icon-button" onClick={() => void toggleReview(review.id, !review.published)} disabled={busy} title={review.published ? 'Hide review' : 'Publish review'}>{review.published ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="admin-icon-button danger" onClick={() => void removeReview(review.id)} disabled={busy} title="Delete review"><Trash2 size={15} /></button></div></article>)}{reviews.length === 0 ? <div className="admin-empty">No reviews yet.</div> : null}</div>
+        <div className="review-admin-list">{reviews.map(review => <article className="review-admin-row" key={review.id}>{review.photo_data ? <img className="review-admin-photo" src={getReviewPhotoDataUrl(review.photo_data)} alt={`Guest photo from ${review.full_name}`} loading="lazy" decoding="async" /> : null}<div className="review-admin-main"><div className="review-admin-stars" aria-label={`${review.rating} out of 5 stars`}>{[1,2,3,4,5].map(value => <Star key={value} size={13} fill={value <= review.rating ? 'currentColor' : 'none'} />)}</div><strong>{review.full_name}</strong><p>{review.review_text}</p><small>{formatDateTime(review.created_at)}{review.photo_data ? ' · Photo attached' : ''}</small></div><div className="review-admin-actions"><span className={review.published ? 'status-pill green' : 'status-pill'}>{review.published ? 'Published' : 'Hidden'}</span><button className="admin-icon-button" onClick={() => void toggleReview(review.id, !review.published)} disabled={busy} title={review.published ? 'Hide review' : 'Publish review'}>{review.published ? <EyeOff size={15} /> : <Eye size={15} />}</button><button className="admin-icon-button danger" onClick={() => void removeReview(review.id)} disabled={busy} title="Delete review"><Trash2 size={15} /></button></div></article>)}{reviews.length === 0 ? <div className="admin-empty">No reviews yet.</div> : null}</div>
       </section> : null}
 
       {tab === 'settings' ? <section className="admin-section"><div className="admin-section-head"><div><span className="eyebrow">LIVE CONTENT</span><h2>Homepage message</h2></div><span className="admin-muted">Published to the public site</span></div><div className="settings-card"><p>Change the short message shown on the homepage without redeploying the site.</p><textarea value={dailyMessage} onChange={e => setDailyMessage(e.target.value)} rows={5} /><div className="settings-actions"><span>{notice || 'Keep it brief and useful.'}</span><button className="button button-primary" onClick={() => void handleSaveMessage()} disabled={busy}>Save message</button></div></div></section> : null}
